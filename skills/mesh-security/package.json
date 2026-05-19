@@ -1,0 +1,32 @@
+{
+  "name": "mesh-security-skill",
+  "version": "1.0.0",
+  "description": "Service mesh security analyzer skill for Istio, Consul, and Linkerd",
+  "main": "lib/analyzer-wrapper.js",
+  "bin": {
+    "mesh-analyze": "lib/analyzer-wrapper.js",
+    "mesh-remediate": "lib/remediation-engine.js",
+    "mesh-report": "lib/report-generator.js"
+  },
+  "scripts": {
+    "analyze": "node lib/analyzer-wrapper.js",
+    "remediate": "node lib/remediation-engine.js",
+    "report": "node lib/report-generator.js"
+  },
+  "keywords": [
+    "service-mesh",
+    "security",
+    "istio",
+    "consul",
+    "linkerd",
+    "nist",
+    "fedramp",
+    "compliance",
+    "agent-skill"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

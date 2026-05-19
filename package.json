@@ -1,0 +1,22 @@
+{
+  "name": "my-agent-stuff",
+  "version": "0.0.1",
+  "description": "Public agent skills for Pi, Codex, and compatible Agent Skills runtimes.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "agent-skills",
+    "pi",
+    "codex",
+    "security",
+    "grc"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

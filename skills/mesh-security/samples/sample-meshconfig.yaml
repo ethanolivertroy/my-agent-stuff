@@ -1,0 +1,57 @@
+apiVersion: networking.istio.io/v1alpha1
+kind: MeshConfig
+metadata:
+  name: istio-system
+spec:
+  # Basic configuration
+  defaultConfig:
+    image: docker.io/istio/proxyv2:1.18.2
+    concurrency: 2
+    privileged: true  # Security issue - should be false
+    holdApplicationUntilProxyStarts: false  # Security issue - should be true
+    sds:
+      enabled: false  # Security issue - should be true
+    proxyMetadata:
+      DNS_CAPTURE: "true"
+      ISTIO_META_DNS_CAPTURE: "true"
+      ISTIO_META_CLUSTER_ID: "Kubernetes"
+
+  # mTLS configuration
+  meshMTLS:
+    enabled: true
+    mode: "PERMISSIVE"  # Security issue - should be STRICT
+
+  # Certificate Authority configuration
+  ca:
+    provider: "istiod"  # Consider using external CA for production
+    certValidityDuration: "8760h"  # 1 year - consider shorter duration
+
+  # Trust domain
+  trustDomain: "cluster.local"  # Consider custom trust domain
+
+  # Telemetry configuration
+  telemetry:
+    enabled: false  # Security issue - should be true for monitoring
+    accessLogging:
+      enabled: false  # Security issue - should be true for audit
+
+  # RBAC configuration
+  rbac:
+    mode: "OFF"  # Critical security issue - should be ON
+
+  # Peer authentication
+  peerAuthentication:
+    mode: "PERMISSIVE"  # Security issue - should be STRICT
+
+  # Outbound traffic policy
+  outboundTrafficPolicy:
+    mode: "ALLOW_ANY"  # Security issue - should be REGISTRY_ONLY
+
+  # Extension providers
+  extensionProviders:
+    - name: "oauth"
+      envoyExtAuthzHttp:
+        service: "oauth-service.istio-system.svc.cluster.local"
+        port: 8080
+        includeHeadersInCheck: ["authorization", "cookie"]
+        headersToUpstreamOnAllow: ["x-auth-user", "x-auth-groups"]
