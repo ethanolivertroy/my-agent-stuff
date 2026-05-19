@@ -1,0 +1,98 @@
+mesh_type: linkerd
+
+# Identity configuration
+identity:
+  enabled: true
+  issuer: external  # can be 'self-signed' or 'external'
+  certValidityPeriod: 8760  # 1 year in hours
+  trustAnchorsPEM:
+    - |
+      -----BEGIN CERTIFICATE-----
+      MIIBmzCCAUGgAwIBAgIQeU5/zlTjZFbDlbkyvZwFcDAKBggqhkjOPQQDAjApMScw
+      JQYDVQQDEx5pZGVudGl0eS5saW5rZXJkLmNsdXN0ZXIubG9jYWwwHhcNMjMwMTAx
+      MDAwMDAwWhcNMjQwMTAxMDAwMDAwWjApMScwJQYDVQQDEx5pZGVudGl0eS5saW5r
+      ZXJkLmNsdXN0ZXIubG9jYWwwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASbclmg
+      uIDE4PcWNoJ91pSrfyMVaXCQat/noUSodqIy1j6TfJ6q8E+6JrECVI6hE+F+FCLh
+      3oDqE8Bvlw4p8oQjo20wazAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0TAQH/BAUwAwEB
+      /zApBgNVHREEIjAggh5pZGVudGl0eS5saW5rZXJkLmNsdXN0ZXIubG9jYWwwHQYD
+      VR0OBBYEFLXLxNTXgKl9U3OvjM0n1JL6qMHHMAoGCCqGSM49BAMCA0gAMEUCIQCG
+      RdK332vqoFbRRx6e9sgI4yrnx0ESMGnYgDQJVOYLNwIgKiOTOOsXUKHx4xwD4Q7E
+      aFb8XqJtJjdH2VMUpTXUoD0=
+      -----END CERTIFICATE-----
+
+# TLS configuration
+tls:
+  enabled: true
+  enforced: true  # This enforces strict TLS for all communication
+  minimumVersion: TLSv1.2
+  cipherSuites:
+    - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+    - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+
+# Proxy configuration
+proxy:
+  privileged: false
+  image: cr.l5d.io/linkerd/proxy:stable-2.12.3
+  logLevel: info
+  outboundConnectTimeout: 1000  # milliseconds
+  inboundConnectTimeout: 100    # milliseconds
+  resources:
+    cpu:
+      request: 100m
+      limit: 1000m
+    memory:
+      request: 20Mi
+      limit: 250Mi
+
+# Policy configuration
+policy:
+  enabled: true
+  defaultDeny: true  # Default deny-all policy
+  serverPolicies:
+    - server: linkerd-controller
+      clients:
+        - account: default
+          namespace: default
+    - server: linkerd-prometheus
+      clients:
+        - account: grafana
+          namespace: linkerd-viz
+        - account: metrics-api
+          namespace: linkerd-viz
+
+# Authentication configuration
+authentication:
+  enabled: true
+  mode: strict  # Can be 'strict' or 'permissive'
+
+# Tracing configuration
+tracing:
+  enabled: true
+  sampling: 0.1  # Sample 10% of requests
+  collector:
+    service: jaeger-collector
+    port: 9411
+
+# Metrics configuration
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    scrapeInterval: 15s
+  retention: 6h  # How long to retain metrics
+
+# Destination rules configuration
+destinationRules:
+  - host: "*.default.svc.cluster.local"
+    tls:
+      mode: ISTIO_MUTUAL
+  - host: "*.kube-system.svc.cluster.local"
+    tls:
+      mode: DISABLE
+  - host: "*.linkerd-viz.svc.cluster.local"
+    tls:
+      mode: ISTIO_MUTUAL
