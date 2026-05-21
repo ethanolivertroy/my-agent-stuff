@@ -1,8 +1,8 @@
 /** @jsxImportSource @opentui/react */
 
 import { useEffect } from "react";
-import { useIslandBridge } from "opentui-island";
-import { TermDrawApp } from "@termdraw/opentui";
+import { useIslandBridge } from "../opentui-island/index.js";
+import { TermDrawApp } from "../termdraw-opentui/index.js";
 
 type PiTermDrawIslandProps = {
   showStartupLogo?: boolean;

@@ -1,0 +1,2232 @@
+/**
+ * Home of the stateful `DrawState` coordinator.
+ *
+ * This file wires together tool state, selection state, undo/redo, pointer handling,
+ * object transforms, scene caching, and the higher-level editor behaviors built on the
+ * smaller helpers in `src/draw-state/`.
+ */
+import { MouseButton } from "@opentui/core";
+import { clamp, getRectArea, getRectPerimeterPoints, isValidRect, normalizeRect, rectContainsPoint, rectContainsRect, rectsIntersect, } from "./draw-state/geometry.js";
+import { appendPaintSegment, constrainLinePoint, getElbowRenderCharacters, getLineRenderCharacters, mergeUniquePoints, pointFromKey, pointsEqual, } from "./draw-state/line.js";
+import { cloneObjects, getBoundsUnion, getBoxContentBounds, getBoxCornerPoints, getLineEndpointPoints, getObjectBounds, getObjectRenderCells, getObjectSelectionBounds, objectContainsPoint, translateObject, } from "./draw-state/object-utils.js";
+import { adjustConnection, applyBoxPerimeter, createCanvas, createColorGrid, createConnectionGrid, getBoxBorderGlyphs, getConnectionGlyph as getConnectionGlyphForGrid, paintConnectionColor, } from "./draw-state/scene.js";
+import { getTextContentOrigin, getTextRenderRect, getTextSelectionBounds, normalizeCellCharacter, padToWidth, splitGraphemes, truncateToCells, visibleCellCount, } from "./text.js";
+import { BRUSHES, BOX_STYLES, DRAW_DOCUMENT_VERSION, DEFAULT_CANVAS_INSETS, INK_COLORS, LINE_STYLES, TEXT_BORDER_MODES, } from "./draw-state/types.js";
+export { BRUSHES, BOX_STYLES, DRAW_DOCUMENT_VERSION, INK_COLORS, LINE_STYLES, TEXT_BORDER_MODES, padToWidth, truncateToCells, visibleCellCount, };
+const MAX_HISTORY = 100;
+const HANDLE_CHARACTER = "●";
+const LINE_MODE_STYLES = ["smooth", "light", "double"];
+const ELBOW_LINE_STYLES = ["light", "double", "dashed"];
+function isRecord(value) {
+    return typeof value === "object" && value !== null;
+}
+function readInteger(value, label) {
+    if (!Number.isInteger(value)) {
+        throw new Error(`${label} must be an integer.`);
+    }
+    return value;
+}
+function readNonEmptyString(value, label) {
+    if (typeof value !== "string" || value.length === 0) {
+        throw new Error(`${label} must be a non-empty string.`);
+    }
+    return value;
+}
+function readString(value, label) {
+    if (typeof value !== "string") {
+        throw new Error(`${label} must be a string.`);
+    }
+    return value;
+}
+function readNullableString(value, label) {
+    if (value === null)
+        return null;
+    if (typeof value !== "string") {
+        throw new Error(`${label} must be a string or null.`);
+    }
+    return value;
+}
+function readEnumValue(value, label, options) {
+    if (typeof value !== "string" || !options.includes(value)) {
+        throw new Error(`${label} must be one of: ${options.join(", ")}.`);
+    }
+    return value;
+}
+function readLineStyle(value, label) {
+    return readEnumValue(value, label, LINE_STYLES);
+}
+function readElbowLineStyle(value, label) {
+    if (value === "smooth")
+        return "light";
+    return readEnumValue(value, label, ["light", "double", "dashed"]);
+}
+function readPoint(value, label) {
+    if (!isRecord(value)) {
+        throw new Error(`${label} must be an object.`);
+    }
+    return {
+        x: readInteger(value.x, `${label}.x`),
+        y: readInteger(value.y, `${label}.y`),
+    };
+}
+function parseDocumentObject(value, index) {
+    const label = `objects[${index}]`;
+    if (!isRecord(value)) {
+        throw new Error(`${label} must be an object.`);
+    }
+    const id = readNonEmptyString(value.id, `${label}.id`);
+    const z = readInteger(value.z, `${label}.z`);
+    const parentId = readNullableString(value.parentId, `${label}.parentId`);
+    const color = readEnumValue(value.color, `${label}.color`, INK_COLORS);
+    const type = readString(value.type, `${label}.type`);
+    switch (type) {
+        case "box": {
+            const box = {
+                id,
+                type,
+                z,
+                parentId,
+                color,
+                left: readInteger(value.left, `${label}.left`),
+                top: readInteger(value.top, `${label}.top`),
+                right: readInteger(value.right, `${label}.right`),
+                bottom: readInteger(value.bottom, `${label}.bottom`),
+                style: readEnumValue(value.style, `${label}.style`, BOX_STYLES),
+            };
+            if (!isValidRect(box)) {
+                throw new Error(`${label} must have valid box bounds.`);
+            }
+            return box;
+        }
+        case "line":
+            return {
+                id,
+                type,
+                z,
+                parentId,
+                color,
+                x1: readInteger(value.x1, `${label}.x1`),
+                y1: readInteger(value.y1, `${label}.y1`),
+                x2: readInteger(value.x2, `${label}.x2`),
+                y2: readInteger(value.y2, `${label}.y2`),
+                style: readLineStyle(value.style, `${label}.style`),
+            };
+        case "elbow":
+            return {
+                id,
+                type,
+                z,
+                parentId,
+                color,
+                x1: readInteger(value.x1, `${label}.x1`),
+                y1: readInteger(value.y1, `${label}.y1`),
+                x2: readInteger(value.x2, `${label}.x2`),
+                y2: readInteger(value.y2, `${label}.y2`),
+                style: readElbowLineStyle(value.style, `${label}.style`),
+                orientation: value.orientation === "vertical-first" || value.orientation === "horizontal-first"
+                    ? value.orientation
+                    : "horizontal-first",
+            };
+        case "paint": {
+            const pointsValue = value.points;
+            if (!Array.isArray(pointsValue) || pointsValue.length === 0) {
+                throw new Error(`${label}.points must be a non-empty array.`);
+            }
+            const brush = readString(value.brush, `${label}.brush`);
+            if (visibleCellCount(brush) !== 1) {
+                throw new Error(`${label}.brush must be exactly one visible cell.`);
+            }
+            return {
+                id,
+                type,
+                z,
+                parentId,
+                color,
+                points: pointsValue.map((point, pointIndex) => readPoint(point, `${label}.points[${pointIndex}]`)),
+                brush,
+            };
+        }
+        case "text":
+            return {
+                id,
+                type,
+                z,
+                parentId,
+                color,
+                x: readInteger(value.x, `${label}.x`),
+                y: readInteger(value.y, `${label}.y`),
+                content: readString(value.content, `${label}.content`),
+                border: readEnumValue(value.border, `${label}.border`, TEXT_BORDER_MODES),
+            };
+        default:
+            throw new Error(`${label}.type must be one of: box, line, paint, text.`);
+    }
+}
+export function validateDrawDocument(value) {
+    if (!isRecord(value)) {
+        throw new Error("termDRAW document must be a JSON object.");
+    }
+    if (value.version !== DRAW_DOCUMENT_VERSION) {
+        throw new Error(`termDRAW document version must be ${DRAW_DOCUMENT_VERSION}; received ${String(value.version)}.`);
+    }
+    if (!Array.isArray(value.objects)) {
+        throw new Error("termDRAW document objects must be an array.");
+    }
+    const objects = value.objects.map((object, index) => parseDocumentObject(object, index));
+    const ids = new Set();
+    for (const object of objects) {
+        if (ids.has(object.id)) {
+            throw new Error(`termDRAW document contains duplicate object id "${object.id}".`);
+        }
+        ids.add(object.id);
+    }
+    return {
+        version: DRAW_DOCUMENT_VERSION,
+        objects,
+    };
+}
+export function parseDrawDocument(input) {
+    let parsed;
+    try {
+        parsed = JSON.parse(input);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : "Invalid JSON.";
+        throw new Error(`Failed to parse termDRAW document JSON: ${message}`);
+    }
+    return validateDrawDocument(parsed);
+}
+/**
+ * Coordinates the editable termDRAW scene, tool state, selection state, and rendering caches.
+ */
+export class DrawState {
+    canvasInsets = { ...DEFAULT_CANVAS_INSETS };
+    canvasWidth = 0;
+    canvasHeight = 0;
+    cursorX = 0;
+    cursorY = 0;
+    mode = "line";
+    brush = BRUSHES[0];
+    brushIndex = 0;
+    boxStyle = BOX_STYLES[0];
+    boxStyleIndex = 0;
+    lineStyle = LINE_MODE_STYLES[0];
+    lineStyleIndex = 0;
+    elbowLineStyle = ELBOW_LINE_STYLES[0];
+    elbowLineStyleIndex = 0;
+    elbowOrientation = "horizontal-first";
+    textBorderMode = TEXT_BORDER_MODES[0];
+    textBorderModeIndex = 0;
+    inkColor = INK_COLORS[0];
+    inkColorIndex = 0;
+    objects = [];
+    selectedObjectIds = [];
+    selectedObjectId = null;
+    activeTextObjectId = null;
+    textEntryArmed = false;
+    pendingSelection = null;
+    pendingLine = null;
+    pendingBox = null;
+    pendingPaint = null;
+    dragState = null;
+    eraseState = null;
+    nextObjectNumber = 1;
+    nextZIndex = 1;
+    undoStack = [];
+    redoStack = [];
+    status = "Line mode: drag on empty space to create a clean line object, hold Shift to constrain horizontal/vertical, or drag an existing object to move it.";
+    sceneDirty = true;
+    renderCanvas = [];
+    renderCanvasColors = [];
+    renderConnections = [];
+    renderConnectionColors = [];
+    /** Creates a new draw state sized to the provided viewport and canvas insets. */
+    constructor(viewWidth, viewHeight, insets = DEFAULT_CANVAS_INSETS) {
+        this.ensureCanvasSize(viewWidth, viewHeight, insets);
+    }
+    get currentMode() {
+        return this.mode;
+    }
+    get currentBrush() {
+        return this.brush;
+    }
+    get currentBoxStyle() {
+        return this.boxStyle;
+    }
+    get currentLineStyle() {
+        return this.mode === "elbow" ? this.elbowLineStyle : this.lineStyle;
+    }
+    get currentElbowOrientation() {
+        return this.elbowOrientation;
+    }
+    get currentTextBorderMode() {
+        return this.textBorderMode;
+    }
+    get currentInkColor() {
+        return this.inkColor;
+    }
+    get currentStatus() {
+        return this.status;
+    }
+    get currentCursorX() {
+        return this.cursorX;
+    }
+    get currentCursorY() {
+        return this.cursorY;
+    }
+    get width() {
+        return this.canvasWidth;
+    }
+    get height() {
+        return this.canvasHeight;
+    }
+    get canvasTopRow() {
+        return this.canvasInsets.top;
+    }
+    get canvasLeftCol() {
+        return this.canvasInsets.left;
+    }
+    get hasSelectedObject() {
+        return this.selectedObjectIds.length > 0;
+    }
+    get isEditingText() {
+        return this.getActiveTextObject() !== null;
+    }
+    get isTextEntryArmed() {
+        return this.textEntryArmed;
+    }
+    get hasActivePointerInteraction() {
+        return (this.pendingSelection !== null ||
+            this.pendingLine !== null ||
+            this.pendingBox !== null ||
+            this.pendingPaint !== null ||
+            this.dragState !== null ||
+            this.eraseState !== null);
+    }
+    /** Recomputes the drawable canvas from the current viewport and inset configuration. */
+    ensureCanvasSize(viewWidth, viewHeight, insets = this.canvasInsets) {
+        const nextInsets = { ...insets };
+        const nextCanvasWidth = Math.max(1, viewWidth - nextInsets.left - nextInsets.right);
+        const nextCanvasHeight = Math.max(1, viewHeight - nextInsets.top - nextInsets.bottom);
+        if (nextCanvasWidth === this.canvasWidth &&
+            nextCanvasHeight === this.canvasHeight &&
+            nextInsets.left === this.canvasInsets.left &&
+            nextInsets.top === this.canvasInsets.top &&
+            nextInsets.right === this.canvasInsets.right &&
+            nextInsets.bottom === this.canvasInsets.bottom) {
+            return;
+        }
+        this.canvasInsets = nextInsets;
+        this.canvasWidth = nextCanvasWidth;
+        this.canvasHeight = nextCanvasHeight;
+        this.cursorX = Math.max(0, Math.min(this.cursorX, this.canvasWidth - 1));
+        this.cursorY = Math.max(0, Math.min(this.cursorY, this.canvasHeight - 1));
+        this.setObjects(this.objects.map((object) => this.shiftObjectInsideCanvas(object)));
+        this.pendingSelection = null;
+        this.pendingLine = null;
+        this.pendingBox = null;
+        this.pendingPaint = null;
+        this.dragState = null;
+        this.eraseState = null;
+    }
+    /** Routes pointer input into the active tool, drag interaction, or erase session. */
+    handlePointerEvent(event) {
+        if (event.type === "scroll") {
+            const direction = event.scrollDirection === "down" || event.scrollDirection === "left" ? -1 : 1;
+            if (this.mode === "paint") {
+                this.cycleBrush(direction);
+            }
+            else if (this.mode === "box") {
+                this.cycleBoxStyle(direction);
+            }
+            else if (this.mode === "line" || this.mode === "elbow") {
+                this.cycleLineStyle(direction);
+            }
+            return;
+        }
+        const canvasX = event.x - this.canvasLeftCol;
+        const canvasY = event.y - this.canvasTopRow;
+        const clampedX = clamp(canvasX, 0, this.canvasWidth - 1);
+        const clampedY = clamp(canvasY, 0, this.canvasHeight - 1);
+        const insideCanvas = this.isInsideCanvas(canvasX, canvasY);
+        const point = { x: clampedX, y: clampedY };
+        if (event.type === "up" || event.type === "drag-end") {
+            this.syncPointerInteraction(point, event.shift === true);
+            this.finishPointerInteraction(point, insideCanvas);
+            return;
+        }
+        if (event.type === "drag") {
+            this.cursorX = clampedX;
+            this.cursorY = clampedY;
+            if (this.dragState) {
+                this.updateDraggedObject(point, event.shift === true);
+                return;
+            }
+            if (this.pendingSelection) {
+                this.pendingSelection.end = point;
+                this.setStatus(`Selecting ${this.describeRect(normalizeRect(this.pendingSelection.start, this.pendingSelection.end))}.`);
+                return;
+            }
+            if (this.pendingBox) {
+                this.pendingBox.end = point;
+                this.setStatus(`Sizing box ${this.describeRect(normalizeRect(this.pendingBox.start, this.pendingBox.end))}.`);
+                return;
+            }
+            if (this.pendingLine) {
+                const isElbow = this.mode === "elbow";
+                const nextPoint = event.shift === true && !isElbow
+                    ? constrainLinePoint(this.pendingLine.start, point)
+                    : point;
+                this.pendingLine.end = nextPoint;
+                this.pendingLine.orientation = this.getElbowOrientationFromModifier(event.shift === true);
+                this.setStatus(isElbow
+                    ? `Sizing elbow to ${nextPoint.x + 1},${nextPoint.y + 1} (${this.describeElbowOrientation(this.pendingLine.orientation)}).`
+                    : `Sizing line to ${nextPoint.x + 1},${nextPoint.y + 1}.`);
+                return;
+            }
+            if (this.pendingPaint) {
+                this.pendingPaint.points = appendPaintSegment(this.pendingPaint.points, this.pendingPaint.lastPoint, point);
+                this.pendingPaint.lastPoint = point;
+                this.setStatus(`Brush stroke to ${point.x + 1},${point.y + 1}.`);
+                return;
+            }
+            if (insideCanvas && this.eraseState) {
+                this.eraseObjectAt(point.x, point.y);
+            }
+            return;
+        }
+        if (event.type !== "down") {
+            return;
+        }
+        if (!insideCanvas) {
+            if (event.button === MouseButton.LEFT) {
+                this.setSelectedObjects([]);
+                this.activeTextObjectId = null;
+                this.setStatus("Selection cleared.");
+            }
+            return;
+        }
+        this.cursorX = canvasX;
+        this.cursorY = canvasY;
+        if (event.button === MouseButton.RIGHT) {
+            this.beginEraseSession();
+            this.eraseObjectAt(canvasX, canvasY);
+            return;
+        }
+        if (this.tryBeginObjectInteraction(canvasX, canvasY)) {
+            return;
+        }
+        switch (this.mode) {
+            case "select":
+                this.activeTextObjectId = null;
+                this.pendingSelection = {
+                    start: { x: canvasX, y: canvasY },
+                    end: { x: canvasX, y: canvasY },
+                };
+                this.setStatus(`Selection start at ${canvasX + 1},${canvasY + 1}. Drag to select multiple objects.`);
+                return;
+            case "box":
+                this.setSelectedObjects([]);
+                this.activeTextObjectId = null;
+                this.pendingBox = {
+                    start: { x: canvasX, y: canvasY },
+                    end: { x: canvasX, y: canvasY },
+                };
+                this.setStatus(`Box start at ${canvasX + 1},${canvasY + 1}. Drag to size, release to commit.`);
+                return;
+            case "line":
+            case "elbow":
+                this.setSelectedObjects([]);
+                this.activeTextObjectId = null;
+                this.pendingLine = {
+                    start: { x: canvasX, y: canvasY },
+                    end: { x: canvasX, y: canvasY },
+                    orientation: this.elbowOrientation,
+                };
+                this.setStatus(this.mode === "elbow"
+                    ? `Elbow start at ${canvasX + 1},${canvasY + 1}. Drag to endpoint, hold Shift to route vertical-first, release to commit.`
+                    : `Line start at ${canvasX + 1},${canvasY + 1}. Drag to endpoint, hold Shift to constrain, release to commit.`);
+                return;
+            case "paint":
+                this.setSelectedObjects([]);
+                this.activeTextObjectId = null;
+                this.pendingPaint = {
+                    points: [{ x: canvasX, y: canvasY }],
+                    lastPoint: { x: canvasX, y: canvasY },
+                };
+                this.setStatus(`Brush start at ${canvasX + 1},${canvasY + 1}. Drag to draw freehand.`);
+                return;
+            case "text":
+                this.placeTextCursor(canvasX, canvasY);
+                return;
+        }
+    }
+    /** Returns the compact UI label for the active tool mode. */
+    getModeLabel() {
+        switch (this.mode) {
+            case "select":
+                return "SELECT";
+            case "line":
+                return "LINE";
+            case "elbow":
+                return "ELBOW";
+            case "box":
+                return "BOX";
+            case "paint":
+                return "BRUSH";
+            case "text":
+                return "TEXT";
+        }
+    }
+    /** Returns the in-progress overlay characters for the current pointer interaction. */
+    getActivePreviewCharacters() {
+        if (this.pendingPaint)
+            return this.getPaintPreviewCharacters();
+        if (this.pendingLine)
+            return this.getLinePreviewCharacters();
+        if (this.pendingBox)
+            return this.getBoxPreviewCharacters();
+        return new Map();
+    }
+    /** Returns the rendered cell keys currently covered by the selection overlay. */
+    getSelectedCellKeys() {
+        const keys = new Set();
+        for (const selected of this.getSelectedObjects()) {
+            for (const point of getObjectRenderCells(selected)) {
+                if (!this.isInsideCanvas(point.x, point.y))
+                    continue;
+                keys.add(`${point.x},${point.y}`);
+            }
+            if (selected.type === "text") {
+                for (const point of getRectPerimeterPoints(getTextSelectionBounds(selected))) {
+                    if (!this.isInsideCanvas(point.x, point.y))
+                        continue;
+                    keys.add(`${point.x},${point.y}`);
+                }
+            }
+        }
+        return keys;
+    }
+    /** Returns the dotted marquee preview for an in-progress selection drag. */
+    getSelectionMarqueeCharacters() {
+        const marquee = new Map();
+        if (!this.pendingSelection)
+            return marquee;
+        const rect = normalizeRect(this.pendingSelection.start, this.pendingSelection.end);
+        for (const point of getRectPerimeterPoints(rect)) {
+            if (!this.isInsideCanvas(point.x, point.y))
+                continue;
+            marquee.set(`${point.x},${point.y}`, "·");
+        }
+        return marquee;
+    }
+    /** Returns resize or endpoint handles for the current single-object selection. */
+    getSelectionHandleCharacters() {
+        const handles = new Map();
+        if (this.selectedObjectIds.length !== 1)
+            return handles;
+        const selected = this.getSelectedObject();
+        if (!selected)
+            return handles;
+        if (selected.type === "box") {
+            for (const point of Object.values(getBoxCornerPoints(selected))) {
+                if (!this.isInsideCanvas(point.x, point.y))
+                    continue;
+                handles.set(`${point.x},${point.y}`, HANDLE_CHARACTER);
+            }
+            return handles;
+        }
+        if (selected.type === "line") {
+            for (const point of Object.values(getLineEndpointPoints(selected))) {
+                if (!this.isInsideCanvas(point.x, point.y))
+                    continue;
+                handles.set(`${point.x},${point.y}`, HANDLE_CHARACTER);
+            }
+        }
+        return handles;
+    }
+    /** Clears the current selection and active text edit state. */
+    clearSelection() {
+        const hadSelection = this.selectedObjectIds.length > 0 || this.activeTextObjectId !== null || this.textEntryArmed;
+        this.setSelectedObjects([]);
+        this.activeTextObjectId = null;
+        this.textEntryArmed = false;
+        this.setStatus(hadSelection ? "Selection cleared." : "Nothing selected.");
+        return hadSelection;
+    }
+    /** Returns the final rendered character at a canvas cell. */
+    getCompositeCell(x, y) {
+        this.ensureScene();
+        const ink = this.renderCanvas[y][x] ?? " ";
+        if (ink !== " ")
+            return ink;
+        return this.getConnectionGlyph(x, y);
+    }
+    /** Returns the final rendered color at a canvas cell. */
+    getCompositeColor(x, y) {
+        this.ensureScene();
+        const ink = this.renderCanvas[y][x] ?? " ";
+        if (ink !== " ") {
+            return this.renderCanvasColors[y][x] ?? null;
+        }
+        return this.getConnectionGlyph(x, y) === " "
+            ? null
+            : (this.renderConnectionColors[y][x] ?? null);
+    }
+    /** Moves the keyboard cursor while keeping it inside the canvas bounds. */
+    moveCursor(dx, dy) {
+        this.cursorX = Math.max(0, Math.min(this.canvasWidth - 1, this.cursorX + dx));
+        this.cursorY = Math.max(0, Math.min(this.canvasHeight - 1, this.cursorY + dy));
+        if (this.mode === "text") {
+            this.activeTextObjectId = null;
+        }
+        this.setStatus(`Cursor ${this.cursorX + 1},${this.cursorY + 1}.`);
+    }
+    /** Translates the selected object tree by the requested delta when possible. */
+    moveSelectedObjectBy(dx, dy) {
+        const selected = this.getSelectedObjects();
+        if (selected.length === 0) {
+            this.setStatus("No object selected.");
+            return;
+        }
+        const selectedTree = this.getSelectedObjectTrees();
+        const movedTree = this.translateObjectTreeWithinCanvas(selectedTree, dx, dy);
+        if (this.objectListsEqual(movedTree, selectedTree)) {
+            this.setStatus(selected.length === 1
+                ? `${this.describeObject(selected[0])} is already at the edge.`
+                : "Selection is already at the edge.");
+            return;
+        }
+        this.pushUndo();
+        this.replaceObjects(movedTree);
+        this.activeTextObjectId = null;
+        this.setStatus(selected.length === 1
+            ? `Moved ${this.describeObject(selected[0])}.`
+            : `Moved ${selected.length} objects.`);
+    }
+    /** Sets the active brush character used for paint strokes. */
+    setBrush(char) {
+        this.brush = normalizeCellCharacter(char);
+        const idx = BRUSHES.indexOf(this.brush);
+        this.brushIndex = idx >= 0 ? idx : 0;
+        this.setStatus(`Brush set to "${this.brush}".`);
+    }
+    /** Cycles through the predefined brush palette. */
+    cycleBrush(direction) {
+        this.brushIndex = (this.brushIndex + direction + BRUSHES.length) % BRUSHES.length;
+        this.brush = BRUSHES[this.brushIndex] ?? this.brush;
+        this.setStatus(`Brush set to "${this.brush}".`);
+    }
+    /** Sets the active ink color and reapplies it to the current selection. */
+    setInkColor(color) {
+        this.inkColor = color;
+        const idx = INK_COLORS.indexOf(color);
+        this.inkColorIndex = idx >= 0 ? idx : 0;
+        const selected = this.getSelectedObjects();
+        const recolorable = selected.filter((object) => object.color !== color);
+        if (recolorable.length === 0) {
+            this.setStatus(`Color set to ${this.describeInkColor(color)}.`);
+            return;
+        }
+        this.pushUndo();
+        this.replaceObjects(recolorable.map((object) => ({ ...object, color })));
+        this.setStatus(recolorable.length === 1
+            ? `Applied ${this.describeInkColor(color)} to ${this.describeObject(recolorable[0])}.`
+            : `Applied ${this.describeInkColor(color)} to ${recolorable.length} objects.`);
+    }
+    /** Cycles through the available ink colors. */
+    cycleInkColor(direction) {
+        this.inkColorIndex = (this.inkColorIndex + direction + INK_COLORS.length) % INK_COLORS.length;
+        this.inkColor = INK_COLORS[this.inkColorIndex] ?? this.inkColor;
+        this.setStatus(`Color set to ${this.describeInkColor(this.inkColor)}.`);
+    }
+    /** Sets the active box border style. */
+    setBoxStyle(style) {
+        this.boxStyle = style;
+        const idx = BOX_STYLES.indexOf(style);
+        this.boxStyleIndex = idx >= 0 ? idx : 0;
+        this.setStatus(`Box style set to ${this.describeBoxStyle(style)}.`);
+    }
+    /** Cycles through the available box border styles. */
+    cycleBoxStyle(direction) {
+        this.boxStyleIndex = (this.boxStyleIndex + direction + BOX_STYLES.length) % BOX_STYLES.length;
+        this.boxStyle = BOX_STYLES[this.boxStyleIndex] ?? this.boxStyle;
+        this.setStatus(`Box style set to ${this.describeBoxStyle(this.boxStyle)}.`);
+    }
+    /** Sets the active line or elbow style. */
+    setLineStyle(style) {
+        if (this.mode === "elbow") {
+            const nextStyle = style === "smooth" ? "light" : style;
+            const idx = ELBOW_LINE_STYLES.indexOf(nextStyle);
+            this.elbowLineStyle = idx >= 0 ? nextStyle : "light";
+            this.elbowLineStyleIndex = Math.max(0, idx);
+            this.setStatus(`Elbow style set to ${this.describeLineStyle(this.elbowLineStyle)}.`);
+            return;
+        }
+        const nextStyle = style === "dashed" ? "light" : style;
+        const idx = LINE_MODE_STYLES.indexOf(nextStyle);
+        this.lineStyle = idx >= 0 ? nextStyle : "smooth";
+        this.lineStyleIndex = Math.max(0, idx);
+        this.setStatus(`Line style set to ${this.describeLineStyle(this.lineStyle)}.`);
+    }
+    /** Cycles through the available line or elbow styles. */
+    cycleLineStyle(direction) {
+        if (this.mode === "elbow") {
+            this.elbowLineStyleIndex =
+                (this.elbowLineStyleIndex + direction + ELBOW_LINE_STYLES.length) %
+                    ELBOW_LINE_STYLES.length;
+            this.elbowLineStyle = ELBOW_LINE_STYLES[this.elbowLineStyleIndex] ?? this.elbowLineStyle;
+            this.setStatus(`Elbow style set to ${this.describeLineStyle(this.elbowLineStyle)}.`);
+            return;
+        }
+        this.lineStyleIndex =
+            (this.lineStyleIndex + direction + LINE_MODE_STYLES.length) % LINE_MODE_STYLES.length;
+        this.lineStyle = LINE_MODE_STYLES[this.lineStyleIndex] ?? this.lineStyle;
+        this.setStatus(`Line style set to ${this.describeLineStyle(this.lineStyle)}.`);
+    }
+    /** Sets the active text border mode. */
+    setTextBorderMode(mode) {
+        this.textBorderMode = mode;
+        const idx = TEXT_BORDER_MODES.indexOf(mode);
+        this.textBorderModeIndex = idx >= 0 ? idx : 0;
+        this.setStatus(`Text border set to ${this.describeTextBorderMode(mode)}.`);
+    }
+    /** Cycles through the available text border modes. */
+    cycleTextBorderMode(direction) {
+        this.textBorderModeIndex =
+            (this.textBorderModeIndex + direction + TEXT_BORDER_MODES.length) % TEXT_BORDER_MODES.length;
+        this.textBorderMode = TEXT_BORDER_MODES[this.textBorderModeIndex] ?? this.textBorderMode;
+        this.setStatus(`Text border set to ${this.describeTextBorderMode(this.textBorderMode)}.`);
+    }
+    /** Advances to the next drawing mode in the standard tool order. */
+    cycleMode() {
+        const order = ["select", "box", "line", "elbow", "paint", "text"];
+        const currentIndex = order.indexOf(this.mode);
+        const next = order[(currentIndex + 1) % order.length] ?? "line";
+        this.setMode(next);
+    }
+    /** Switches tools and clears transient interaction state that does not survive mode changes. */
+    setMode(next) {
+        if (this.mode === next)
+            return;
+        this.mode = next;
+        this.pendingSelection = null;
+        this.pendingLine = null;
+        this.pendingBox = null;
+        this.pendingPaint = null;
+        this.dragState = null;
+        this.eraseState = null;
+        if (next !== "text") {
+            this.activeTextObjectId = null;
+        }
+        if (next === "select") {
+            this.setStatus("Select mode: click objects to select them, drag selected objects to move them, or drag empty space to marquee-select multiple objects.");
+        }
+        else if (next === "line") {
+            this.setStatus(`Line mode (${this.describeLineStyle(this.lineStyle)}): drag on empty space to create a line. Hold Shift to constrain horizontal/vertical. Click objects to move them, or line endpoints to adjust.`);
+        }
+        else if (next === "elbow") {
+            this.setStatus(`Elbow mode (${this.describeLineStyle(this.elbowLineStyle)}, ${this.describeElbowOrientation(this.elbowOrientation)}): drag on empty space to create a right-angle connector with an arrow. Press R to toggle route; hold Shift to route vertical-first. Click objects to move them, or endpoints to adjust.`);
+        }
+        else if (next === "box") {
+            this.setStatus(`Box mode (${this.describeBoxStyle(this.boxStyle)}): drag on empty space to create a box. Click objects to move them, or drag box corners to resize.`);
+        }
+        else if (next === "paint") {
+            this.setStatus("Brush mode: drag on empty space to draw freehand. Click objects to move them, and use the current brush for freehand strokes.");
+        }
+        else {
+            this.setStatus(`Text mode (${this.describeTextBorderMode(this.textBorderMode)}): click empty space to type, click text to edit, and use its virtual selection box to move it.`);
+        }
+    }
+    /** Toggles the route used by new elbow connectors. */
+    toggleElbowOrientation() {
+        this.elbowOrientation =
+            this.elbowOrientation === "horizontal-first" ? "vertical-first" : "horizontal-first";
+        if (this.mode === "elbow" && this.pendingLine) {
+            this.pendingLine.orientation = this.elbowOrientation;
+        }
+        this.setStatus(`Elbow route set to ${this.describeElbowOrientation(this.elbowOrientation)}${this.elbowOrientation === "vertical-first"
+            ? " (horizontal arrowheads)"
+            : " (vertical arrowheads)"}.`);
+    }
+    /** Creates a one-cell paint or line object at the current cursor position. */
+    stampBrushAtCursor() {
+        this.pushUndo();
+        if (this.mode === "paint") {
+            const object = {
+                id: this.createObjectId(),
+                z: this.allocateZIndex(),
+                parentId: null,
+                color: this.inkColor,
+                type: "paint",
+                points: [{ x: this.cursorX, y: this.cursorY }],
+                brush: this.brush,
+            };
+            this.setObjects([...this.objects, object]);
+            this.setSelectedObjects([object.id], object.id);
+            this.activeTextObjectId = null;
+            this.setStatus(`Stamped brush "${this.brush}" at ${this.cursorX + 1},${this.cursorY + 1}.`);
+            return;
+        }
+        const object = {
+            id: this.createObjectId(),
+            z: this.allocateZIndex(),
+            parentId: null,
+            color: this.inkColor,
+            type: "line",
+            x1: this.cursorX,
+            y1: this.cursorY,
+            x2: this.cursorX,
+            y2: this.cursorY,
+            style: this.lineStyle,
+        };
+        this.setObjects([...this.objects, object]);
+        this.setSelectedObjects([object.id], object.id);
+        this.activeTextObjectId = null;
+        this.setStatus(`Stamped "•" at ${this.cursorX + 1},${this.cursorY + 1}.`);
+    }
+    /** Deletes the topmost object under the keyboard cursor. */
+    eraseAtCursor() {
+        if (this.deleteTopmostObjectAt(this.cursorX, this.cursorY))
+            return;
+        this.setStatus(`Nothing to erase at ${this.cursorX + 1},${this.cursorY + 1}.`);
+    }
+    /** Appends text into the active text object or starts a new one at the cursor. */
+    insertCharacter(input) {
+        if (!this.textEntryArmed && !this.getActiveTextObject()) {
+            this.setStatus("Click to start a text box, or click existing text to edit it.");
+            return;
+        }
+        const char = normalizeCellCharacter(input);
+        this.pushUndo();
+        const activeObject = this.getActiveTextObject();
+        if (activeObject) {
+            const updated = {
+                ...activeObject,
+                content: activeObject.content + char,
+            };
+            this.replaceObject(updated);
+            this.setSelectedObjects([updated.id], updated.id);
+            this.activeTextObjectId = updated.id;
+            this.textEntryArmed = true;
+            this.cursorX = Math.min(this.canvasWidth - 1, updated.x + visibleCellCount(updated.content));
+            this.cursorY = updated.y;
+            this.setStatus(`Appended "${char}" to ${this.describeObject(updated)}.`);
+            return;
+        }
+        const object = {
+            id: this.createObjectId(),
+            z: this.allocateZIndex(),
+            parentId: null,
+            color: this.inkColor,
+            type: "text",
+            x: this.cursorX,
+            y: this.cursorY,
+            content: char,
+            border: this.textBorderMode,
+        };
+        this.setObjects([...this.objects, object]);
+        this.setSelectedObjects([object.id], object.id);
+        this.activeTextObjectId = object.id;
+        this.textEntryArmed = true;
+        this.cursorX = Math.min(this.canvasWidth - 1, this.cursorX + 1);
+        this.setStatus(`Created ${this.describeObject(this.getObjectById(object.id) ?? object)}.`);
+    }
+    /** Deletes the last grapheme from the active text object or erases under the cursor. */
+    backspace() {
+        const activeObject = this.getActiveTextObject();
+        if (!activeObject) {
+            if (this.deleteTopmostObjectAt(this.cursorX, this.cursorY))
+                return;
+            this.setStatus(`Nothing to backspace at ${this.cursorX + 1},${this.cursorY + 1}.`);
+            return;
+        }
+        this.pushUndo();
+        const parts = splitGraphemes(activeObject.content);
+        parts.pop();
+        if (parts.length === 0) {
+            this.removeObjectById(activeObject.id);
+            this.setSelectedObjects([]);
+            this.activeTextObjectId = null;
+            this.textEntryArmed = false;
+            this.cursorX = activeObject.x;
+            this.cursorY = activeObject.y;
+            this.setStatus(`Removed ${this.describeObject(activeObject)}.`);
+            return;
+        }
+        const updated = {
+            ...activeObject,
+            content: parts.join(""),
+        };
+        this.replaceObject(updated);
+        this.setSelectedObjects([updated.id], updated.id);
+        this.activeTextObjectId = updated.id;
+        this.textEntryArmed = true;
+        this.cursorX = Math.min(this.canvasWidth - 1, updated.x + visibleCellCount(updated.content));
+        this.cursorY = updated.y;
+        this.setStatus(`Backspaced ${this.describeObject(updated)}.`);
+    }
+    /** Deletes the current selection or the topmost object under the cursor. */
+    deleteAtCursor() {
+        if (this.deleteSelectedObject())
+            return;
+        if (this.deleteTopmostObjectAt(this.cursorX, this.cursorY))
+            return;
+        this.setStatus(`Nothing to delete at ${this.cursorX + 1},${this.cursorY + 1}.`);
+    }
+    /** Deletes the current selection and returns whether anything was removed. */
+    deleteSelectedObject() {
+        const selected = this.getSelectedObjects();
+        if (selected.length === 0)
+            return false;
+        this.pushUndo();
+        const selectedIds = new Set(selected.map((object) => object.id));
+        this.setObjects(this.objects.filter((object) => !selectedIds.has(object.id)));
+        this.setSelectedObjects([]);
+        this.activeTextObjectId = null;
+        this.setStatus(selected.length === 1
+            ? `Deleted ${this.describeObject(selected[0])}.`
+            : `Deleted ${selected.length} objects.`);
+        return true;
+    }
+    /** Removes every object from the scene. */
+    clearCanvas() {
+        if (this.objects.length === 0) {
+            this.setStatus("Canvas already clear.");
+            return;
+        }
+        this.pushUndo();
+        this.setObjects([]);
+        this.setSelectedObjects([]);
+        this.activeTextObjectId = null;
+        this.pendingSelection = null;
+        this.pendingLine = null;
+        this.pendingBox = null;
+        this.pendingPaint = null;
+        this.dragState = null;
+        this.eraseState = null;
+        this.markSceneDirty();
+        this.setStatus("Canvas cleared.");
+    }
+    /** Restores the previous snapshot when one exists. */
+    undo() {
+        const snapshot = this.undoStack.pop();
+        if (!snapshot) {
+            this.setStatus("Nothing to undo.");
+            return;
+        }
+        this.redoStack.push(this.createSnapshot());
+        if (this.redoStack.length > MAX_HISTORY) {
+            this.redoStack.shift();
+        }
+        this.restoreSnapshot(snapshot);
+        this.setStatus("Undid last change.");
+    }
+    /** Reapplies the next redo snapshot when one exists. */
+    redo() {
+        const snapshot = this.redoStack.pop();
+        if (!snapshot) {
+            this.setStatus("Nothing to redo.");
+            return;
+        }
+        this.undoStack.push(this.createSnapshot());
+        if (this.undoStack.length > MAX_HISTORY) {
+            this.undoStack.shift();
+        }
+        this.restoreSnapshot(snapshot);
+        this.setStatus("Redid change.");
+    }
+    /** Exports the rendered canvas with surrounding empty rows trimmed away. */
+    exportArt() {
+        this.ensureScene();
+        const lines = [];
+        for (let y = 0; y < this.canvasHeight; y += 1) {
+            let row = "";
+            for (let x = 0; x < this.canvasWidth; x += 1) {
+                const ink = this.renderCanvas[y][x] ?? " ";
+                row += ink !== " " ? ink : this.getConnectionGlyph(x, y);
+            }
+            lines.push(row.replace(/\s+$/g, ""));
+        }
+        while (lines.length > 0 && (lines[0] ?? "") === "") {
+            lines.shift();
+        }
+        while (lines.length > 0 && (lines[lines.length - 1] ?? "") === "") {
+            lines.pop();
+        }
+        return lines.join("\n");
+    }
+    /** Exports the editable scene as a versioned termDRAW document. */
+    exportDocument() {
+        return {
+            version: DRAW_DOCUMENT_VERSION,
+            objects: cloneObjects(this.objects),
+        };
+    }
+    /** Replaces the current editable scene from a validated termDRAW document. */
+    loadDocument(document) {
+        const validatedDocument = validateDrawDocument(document);
+        const nextObjects = cloneObjects(validatedDocument.objects);
+        this.objects = this.recomputeParentAssignments(nextObjects);
+        this.selectedObjectIds = [];
+        this.selectedObjectId = null;
+        this.activeTextObjectId = null;
+        this.textEntryArmed = false;
+        this.pendingSelection = null;
+        this.pendingLine = null;
+        this.pendingBox = null;
+        this.pendingPaint = null;
+        this.dragState = null;
+        this.eraseState = null;
+        this.undoStack = [];
+        this.redoStack = [];
+        this.cursorX = 0;
+        this.cursorY = 0;
+        this.mode = "line";
+        this.brush = BRUSHES[0];
+        this.brushIndex = 0;
+        this.boxStyle = BOX_STYLES[0];
+        this.boxStyleIndex = 0;
+        this.lineStyle = LINE_MODE_STYLES[0];
+        this.lineStyleIndex = 0;
+        this.elbowLineStyle = ELBOW_LINE_STYLES[0];
+        this.elbowLineStyleIndex = 0;
+        this.elbowOrientation = "horizontal-first";
+        this.textBorderMode = TEXT_BORDER_MODES[0];
+        this.textBorderModeIndex = 0;
+        this.inkColor = INK_COLORS[0];
+        this.inkColorIndex = 0;
+        this.nextObjectNumber = this.getNextDocumentObjectNumber(this.objects);
+        this.nextZIndex = this.getNextDocumentZIndex(this.objects);
+        this.markSceneDirty();
+        this.setStatus(this.objects.length === 0
+            ? "Loaded empty diagram."
+            : `Loaded diagram with ${this.objects.length} object${this.objects.length === 1 ? "" : "s"}.`);
+    }
+    /** Replaces the footer status text with an explicit application message. */
+    setStatusMessage(message) {
+        this.setStatus(message);
+    }
+    /** Attempts to start a resize, endpoint drag, or move interaction at the given cell. */
+    tryBeginObjectInteraction(x, y) {
+        this.activeTextObjectId = null;
+        const handleHit = this.findTopmostHandleAt(x, y);
+        if (handleHit) {
+            this.setSelectedObjects([handleHit.object.id], handleHit.object.id);
+            if (handleHit.kind === "box-corner") {
+                this.dragState = {
+                    kind: "resize-box",
+                    objectId: handleHit.object.id,
+                    startMouse: { x, y },
+                    originalObject: { ...handleHit.object },
+                    originalObjects: cloneObjects(this.getObjectTree(handleHit.object.id)),
+                    handle: handleHit.handle,
+                    pushedUndo: false,
+                };
+                this.setStatus(`Selected ${this.describeObject(handleHit.object)}. Drag corner to resize.`);
+                return true;
+            }
+            this.dragState = {
+                kind: "line-endpoint",
+                objectId: handleHit.object.id,
+                startMouse: { x, y },
+                originalObject: { ...handleHit.object },
+                endpoint: handleHit.endpoint,
+                pushedUndo: false,
+            };
+            this.setStatus(`Selected ${this.describeObject(handleHit.object)}. Drag endpoint to adjust it.`);
+            return true;
+        }
+        const hit = this.findTopmostObjectHitAt(x, y);
+        if (!hit)
+            return false;
+        this.beginMoveInteraction(hit.object, x, y, this.mode === "text" && hit.object.type === "text" && hit.onTextContent);
+        return true;
+    }
+    /** Begins moving an object or selection rooted at the clicked object. */
+    beginMoveInteraction(object, x, y, textEditOnClick) {
+        const selectionIds = this.isObjectSelected(object.id) && this.selectedObjectIds.length > 0
+            ? this.selectedObjectIds
+            : [object.id];
+        const moveSelection = this.getMoveSelectionForObject(object);
+        const movingMultiple = selectionIds.length > 1;
+        this.setSelectedObjects(selectionIds, object.id);
+        this.activeTextObjectId = null;
+        this.dragState = {
+            kind: "move",
+            objectId: object.id,
+            startMouse: { x, y },
+            originalObjects: cloneObjects(moveSelection),
+            pushedUndo: false,
+            textEditOnClick: textEditOnClick && selectionIds.length === 1,
+        };
+        this.setStatus(movingMultiple
+            ? `Selected ${selectionIds.length} objects. Drag to move them.`
+            : `Selected ${this.describeObject(object)}. Drag to move it.`);
+    }
+    /** Arms text entry at the requested canvas cell. */
+    placeTextCursor(x, y) {
+        this.setSelectedObjects([]);
+        this.activeTextObjectId = null;
+        this.textEntryArmed = true;
+        this.cursorX = x;
+        this.cursorY = y;
+        this.setStatus(`Text box start at ${x + 1},${y + 1}. Type to begin, Esc to stop typing.`);
+    }
+    /** Starts a right-drag erase session that only removes each object once. */
+    beginEraseSession() {
+        this.pendingSelection = null;
+        this.pendingLine = null;
+        this.pendingBox = null;
+        this.pendingPaint = null;
+        this.dragState = null;
+        this.activeTextObjectId = null;
+        this.eraseState = {
+            erasedIds: new Set(),
+            pushedUndo: false,
+        };
+    }
+    /** Updates the active transient pointer interaction to the latest pointer location. */
+    syncPointerInteraction(point, constrainLineAxis = false) {
+        if (this.dragState) {
+            this.updateDraggedObject(point, constrainLineAxis);
+            return;
+        }
+        if (this.pendingSelection) {
+            this.pendingSelection.end = point;
+            return;
+        }
+        if (this.pendingBox) {
+            this.pendingBox.end = point;
+            return;
+        }
+        if (this.pendingLine) {
+            const isElbow = this.mode === "elbow";
+            this.pendingLine.end =
+                constrainLineAxis && !isElbow ? constrainLinePoint(this.pendingLine.start, point) : point;
+            this.pendingLine.orientation = this.getElbowOrientationFromModifier(constrainLineAxis);
+            return;
+        }
+        if (this.pendingPaint) {
+            this.pendingPaint.points = appendPaintSegment(this.pendingPaint.points, this.pendingPaint.lastPoint, point);
+            this.pendingPaint.lastPoint = point;
+        }
+    }
+    /** Commits or cancels the current transient pointer interaction. */
+    finishPointerInteraction(point, insideCanvas) {
+        if (this.pendingSelection) {
+            const rect = normalizeRect(this.pendingSelection.start, this.pendingSelection.end);
+            this.pendingSelection = null;
+            if (rect.left === rect.right && rect.top === rect.bottom) {
+                this.setSelectedObjects([]);
+                this.setStatus(`Selection cleared at ${rect.left + 1},${rect.top + 1}.`);
+                return;
+            }
+            const selected = this.getObjectsWithinSelectionRect(rect);
+            this.setSelectedObjects(selected.map((object) => object.id), selected.at(-1)?.id ?? null);
+            this.activeTextObjectId = null;
+            this.setStatus(selected.length === 0
+                ? `No objects in ${this.describeRect(rect)}.`
+                : selected.length === 1
+                    ? `Selected ${this.describeObject(selected[0])}.`
+                    : `Selected ${selected.length} objects.`);
+            return;
+        }
+        if (this.pendingBox) {
+            const rect = normalizeRect(this.pendingBox.start, this.pendingBox.end);
+            this.pendingBox = null;
+            if (rect.left === rect.right && rect.top === rect.bottom) {
+                this.setStatus("Ignored zero-size box.");
+                return;
+            }
+            this.pushUndo();
+            const object = {
+                id: this.createObjectId(),
+                z: this.allocateZIndex(),
+                parentId: null,
+                color: this.inkColor,
+                type: "box",
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+                style: this.boxStyle,
+            };
+            this.setObjects([...this.objects, object]);
+            this.setSelectedObjects([object.id], object.id);
+            this.setStatus(`Created ${this.describeObject(this.getObjectById(object.id) ?? object)}.`);
+            return;
+        }
+        if (this.pendingLine) {
+            const start = this.pendingLine.start;
+            const end = this.pendingLine.end;
+            const orientation = this.pendingLine.orientation;
+            const isElbow = this.mode === "elbow";
+            this.pendingLine = null;
+            if (start.x === end.x && start.y === end.y) {
+                this.setStatus(`${isElbow ? "Elbow" : "Line"} cancelled at ${start.x + 1},${start.y + 1}.`);
+                return;
+            }
+            this.pushUndo();
+            const object = isElbow
+                ? {
+                    id: this.createObjectId(),
+                    z: this.allocateZIndex(),
+                    parentId: null,
+                    color: this.inkColor,
+                    type: "elbow",
+                    x1: start.x,
+                    y1: start.y,
+                    x2: end.x,
+                    y2: end.y,
+                    style: this.elbowLineStyle,
+                    orientation,
+                }
+                : {
+                    id: this.createObjectId(),
+                    z: this.allocateZIndex(),
+                    parentId: null,
+                    color: this.inkColor,
+                    type: "line",
+                    x1: start.x,
+                    y1: start.y,
+                    x2: end.x,
+                    y2: end.y,
+                    style: this.lineStyle,
+                };
+            this.setObjects([...this.objects, object]);
+            this.setSelectedObjects([object.id], object.id);
+            this.setStatus(`Created ${this.describeObject(this.getObjectById(object.id) ?? object)}.`);
+            return;
+        }
+        if (this.pendingPaint) {
+            const points = this.pendingPaint.points.map((pointEntry) => ({ ...pointEntry }));
+            this.pendingPaint = null;
+            this.pushUndo();
+            const object = {
+                id: this.createObjectId(),
+                z: this.allocateZIndex(),
+                parentId: null,
+                color: this.inkColor,
+                type: "paint",
+                points,
+                brush: this.brush,
+            };
+            this.setObjects([...this.objects, object]);
+            this.setSelectedObjects([object.id], object.id);
+            this.setStatus(`Created ${this.describeObject(this.getObjectById(object.id) ?? object)}.`);
+            return;
+        }
+        if (this.dragState) {
+            const dragState = this.dragState;
+            this.dragState = null;
+            const object = this.getObjectById(dragState.objectId);
+            if (!dragState.pushedUndo) {
+                if (dragState.kind === "move" && dragState.textEditOnClick && object?.type === "text") {
+                    this.setSelectedObjects([object.id], object.id);
+                    this.activeTextObjectId = object.id;
+                    this.textEntryArmed = true;
+                    this.cursorX = Math.min(this.canvasWidth - 1, object.x + visibleCellCount(object.content));
+                    this.cursorY = object.y;
+                    this.setStatus(`Editing ${this.describeObject(object)}.`);
+                    return;
+                }
+                if (object) {
+                    this.setStatus(dragState.kind === "move" && this.selectedObjectIds.length > 1
+                        ? `Selected ${this.selectedObjectIds.length} objects.`
+                        : `Selected ${this.describeObject(object)}.`);
+                }
+                return;
+            }
+            if (object) {
+                if (dragState.kind === "resize-box") {
+                    this.setStatus(`Resized ${this.describeObject(object)}.`);
+                }
+                else if (dragState.kind === "line-endpoint") {
+                    this.setStatus(`Adjusted ${this.describeObject(object)}.`);
+                }
+                else if (this.selectedObjectIds.length > 1) {
+                    this.setStatus(`Moved ${this.selectedObjectIds.length} objects.`);
+                }
+                else {
+                    this.setStatus(`Moved ${this.describeObject(object)}.`);
+                }
+            }
+            return;
+        }
+        if (this.eraseState) {
+            this.eraseState = null;
+            if (!insideCanvas) {
+                this.setStatus(`Cursor ${point.x + 1},${point.y + 1}.`);
+            }
+        }
+    }
+    /** Applies the latest drag position to the active move, resize, or endpoint edit. */
+    updateDraggedObject(point, constrainLineAxis = false) {
+        const dragState = this.dragState;
+        if (!dragState)
+            return;
+        let nextObjects;
+        let nextObject;
+        switch (dragState.kind) {
+            case "move": {
+                const dx = point.x - dragState.startMouse.x;
+                const dy = point.y - dragState.startMouse.y;
+                nextObjects = this.translateObjectTreeWithinCanvas(dragState.originalObjects, dx, dy);
+                nextObject = nextObjects.find((object) => object.id === dragState.objectId);
+                break;
+            }
+            case "resize-box":
+                nextObjects = this.resizeObjectTreeWithinCanvas(dragState.originalObjects, dragState.originalObject, dragState.handle, point);
+                nextObject = nextObjects.find((object) => object.id === dragState.objectId);
+                break;
+            case "line-endpoint":
+                nextObject = this.adjustLineEndpointWithinCanvas(dragState.originalObject, dragState.endpoint, point, constrainLineAxis);
+                nextObjects = [nextObject];
+                break;
+        }
+        const changed = dragState.kind === "move"
+            ? !this.objectListsEqual(nextObjects, dragState.originalObjects)
+            : dragState.kind === "resize-box"
+                ? !this.objectListsEqual(nextObjects, dragState.originalObjects)
+                : !this.objectsEqual(nextObject, dragState.originalObject);
+        if (!dragState.pushedUndo && changed) {
+            this.pushUndo();
+            dragState.pushedUndo = true;
+            nextObjects = this.bringObjectsToFront(nextObjects);
+            nextObject = nextObjects.find((object) => object.id === dragState.objectId);
+            this.syncDragStateZ(nextObjects);
+        }
+        this.replaceObjects(nextObjects);
+        this.setSelectedObjects(this.selectedObjectIds, nextObject.id);
+        this.activeTextObjectId = null;
+        if (dragState.kind === "resize-box") {
+            this.setStatus(`Resizing ${this.describeObject(nextObject)}.`);
+        }
+        else if (dragState.kind === "line-endpoint") {
+            this.setStatus(`Adjusting ${this.describeObject(nextObject)}.`);
+        }
+        else if (this.selectedObjectIds.length > 1) {
+            this.setStatus(`Moving ${this.selectedObjectIds.length} objects.`);
+        }
+        else {
+            this.setStatus(`Moving ${this.describeObject(nextObject)}.`);
+        }
+    }
+    /** Keeps stored drag snapshots aligned with any z-index changes made during dragging. */
+    syncDragStateZ(objects) {
+        if (!this.dragState)
+            return;
+        const zById = new Map(objects.map((object) => [object.id, object.z]));
+        switch (this.dragState.kind) {
+            case "move":
+                this.dragState.originalObjects = this.dragState.originalObjects.map((object) => ({
+                    ...object,
+                    z: zById.get(object.id) ?? object.z,
+                }));
+                break;
+            case "resize-box":
+                this.dragState.originalObject = {
+                    ...this.dragState.originalObject,
+                    z: zById.get(this.dragState.originalObject.id) ?? this.dragState.originalObject.z,
+                };
+                this.dragState.originalObjects = this.dragState.originalObjects.map((object) => ({
+                    ...object,
+                    z: zById.get(object.id) ?? object.z,
+                }));
+                break;
+            case "line-endpoint":
+                this.dragState.originalObject = {
+                    ...this.dragState.originalObject,
+                    z: zById.get(this.dragState.originalObject.id) ?? this.dragState.originalObject.z,
+                };
+                break;
+        }
+    }
+    /** Erases the topmost object at a cell during an active erase session. */
+    eraseObjectAt(x, y) {
+        const hit = this.findTopmostObjectAt(x, y);
+        if (!hit || !this.eraseState)
+            return;
+        if (this.eraseState.erasedIds.has(hit.id))
+            return;
+        if (!this.eraseState.pushedUndo) {
+            this.pushUndo();
+            this.eraseState.pushedUndo = true;
+        }
+        this.eraseState.erasedIds.add(hit.id);
+        this.removeObjectById(hit.id);
+        if (this.isObjectSelected(hit.id)) {
+            this.setSelectedObjects(this.selectedObjectIds.filter((id) => id !== hit.id));
+        }
+        if (this.activeTextObjectId === hit.id) {
+            this.activeTextObjectId = null;
+            this.textEntryArmed = false;
+        }
+        this.setStatus(`Deleted ${this.describeObject(hit)}.`);
+    }
+    /** Deletes the topmost object at a cell and reports whether anything changed. */
+    deleteTopmostObjectAt(x, y) {
+        const hit = this.findTopmostObjectAt(x, y);
+        if (!hit)
+            return false;
+        this.pushUndo();
+        this.removeObjectById(hit.id);
+        this.setSelectedObjects([]);
+        if (this.activeTextObjectId === hit.id) {
+            this.activeTextObjectId = null;
+            this.textEntryArmed = false;
+        }
+        this.setStatus(`Deleted ${this.describeObject(hit)}.`);
+        return true;
+    }
+    /** Captures the undoable editor state needed to restore the scene later. */
+    createSnapshot() {
+        return {
+            objects: cloneObjects(this.objects),
+            selectedObjectIds: [...this.selectedObjectIds],
+            selectedObjectId: this.selectedObjectId,
+            activeTextObjectId: this.activeTextObjectId,
+            cursorX: this.cursorX,
+            cursorY: this.cursorY,
+            nextObjectNumber: this.nextObjectNumber,
+            nextZIndex: this.nextZIndex,
+            textBorderMode: this.textBorderMode,
+            textBorderModeIndex: this.textBorderModeIndex,
+        };
+    }
+    /** Pushes the current state onto the undo stack and clears redo history. */
+    pushUndo() {
+        this.undoStack.push(this.createSnapshot());
+        if (this.undoStack.length > MAX_HISTORY) {
+            this.undoStack.shift();
+        }
+        this.redoStack = [];
+    }
+    /** Restores editor state from an undo or redo snapshot. */
+    restoreSnapshot(snapshot) {
+        this.objects = this.recomputeParentAssignments(cloneObjects(snapshot.objects).map((object) => this.shiftObjectInsideCanvas(object)));
+        this.selectedObjectIds = [...snapshot.selectedObjectIds];
+        this.selectedObjectId = snapshot.selectedObjectId;
+        this.activeTextObjectId = snapshot.activeTextObjectId;
+        this.syncSelection();
+        this.cursorX = Math.max(0, Math.min(snapshot.cursorX, this.canvasWidth - 1));
+        this.cursorY = Math.max(0, Math.min(snapshot.cursorY, this.canvasHeight - 1));
+        this.nextObjectNumber = snapshot.nextObjectNumber;
+        this.nextZIndex = snapshot.nextZIndex;
+        this.textBorderMode = snapshot.textBorderMode;
+        this.textBorderModeIndex = snapshot.textBorderModeIndex;
+        this.textEntryArmed = this.activeTextObjectId !== null;
+        this.pendingSelection = null;
+        this.pendingLine = null;
+        this.pendingBox = null;
+        this.pendingPaint = null;
+        this.dragState = null;
+        this.eraseState = null;
+        this.markSceneDirty();
+    }
+    /** Rebuilds cached render buffers when scene content has changed. */
+    ensureScene() {
+        if (!this.sceneDirty)
+            return;
+        this.renderCanvas = createCanvas(this.canvasWidth, this.canvasHeight);
+        this.renderCanvasColors = createColorGrid(this.canvasWidth, this.canvasHeight);
+        this.renderConnections = createConnectionGrid(this.canvasWidth, this.canvasHeight);
+        this.renderConnectionColors = createColorGrid(this.canvasWidth, this.canvasHeight);
+        const indexedObjects = this.objects.map((object, index) => ({ object, index }));
+        indexedObjects.sort((a, b) => a.object.z - b.object.z || a.index - b.index);
+        for (const { object } of indexedObjects) {
+            switch (object.type) {
+                case "box": {
+                    const style = this.resolveBoxConnectionStyle(object, object.style, object.id);
+                    if (this.isDashedBoxStyle(style)) {
+                        const { horizontal, vertical, topLeft, topRight, bottomLeft, bottomRight } = getBoxBorderGlyphs(style);
+                        this.paintRenderCell(object.left, object.top, topLeft, object.color);
+                        this.paintRenderCell(object.right, object.top, topRight, object.color);
+                        this.paintRenderCell(object.left, object.bottom, bottomLeft, object.color);
+                        this.paintRenderCell(object.right, object.bottom, bottomRight, object.color);
+                        for (let x = object.left + 1; x < object.right; x += 1) {
+                            this.paintRenderCell(x, object.top, horizontal, object.color);
+                            this.paintRenderCell(x, object.bottom, horizontal, object.color);
+                        }
+                        for (let y = object.top + 1; y < object.bottom; y += 1) {
+                            this.paintRenderCell(object.left, y, vertical, object.color);
+                            this.paintRenderCell(object.right, y, vertical, object.color);
+                        }
+                        break;
+                    }
+                    applyBoxPerimeter(object, (x, y, direction) => {
+                        adjustConnection(this.renderConnections, this.canvasWidth, this.canvasHeight, x, y, direction, style, 1);
+                        paintConnectionColor(this.renderConnectionColors, this.canvasWidth, this.canvasHeight, x, y, direction, object.color);
+                    });
+                    break;
+                }
+                case "line": {
+                    const rendered = getLineRenderCharacters({ x: object.x1, y: object.y1 }, { x: object.x2, y: object.y2 }, object.style);
+                    for (const [key, char] of rendered) {
+                        const { x, y } = pointFromKey(key);
+                        this.paintRenderCell(x, y, char, object.color);
+                    }
+                    break;
+                }
+                case "elbow": {
+                    const rendered = getElbowRenderCharacters({ x: object.x1, y: object.y1 }, { x: object.x2, y: object.y2 }, object.style, object.orientation);
+                    for (const [key, char] of rendered) {
+                        const { x, y } = pointFromKey(key);
+                        this.paintRenderCell(x, y, char, object.color);
+                    }
+                    break;
+                }
+                case "paint": {
+                    for (const point of object.points) {
+                        this.paintRenderCell(point.x, point.y, object.brush, object.color);
+                    }
+                    break;
+                }
+                case "text": {
+                    const contentOrigin = getTextContentOrigin(object);
+                    if (object.border !== "none") {
+                        const contentWidth = Math.max(1, visibleCellCount(object.content));
+                        const left = object.x;
+                        const top = object.y;
+                        const right = object.x + contentWidth + 1;
+                        const bottom = object.y + 2;
+                        if (object.border === "underline") {
+                            for (let x = contentOrigin.x; x < contentOrigin.x + contentWidth; x += 1) {
+                                this.paintRenderCell(x, bottom, "─", object.color);
+                            }
+                        }
+                        else {
+                            const horizontal = object.border === "double" ? "═" : "─";
+                            const vertical = object.border === "double" ? "║" : "│";
+                            const topLeft = object.border === "double" ? "╔" : "┌";
+                            const topRight = object.border === "double" ? "╗" : "┐";
+                            const bottomLeft = object.border === "double" ? "╚" : "└";
+                            const bottomRight = object.border === "double" ? "╝" : "┘";
+                            this.paintRenderCell(left, top, topLeft, object.color);
+                            this.paintRenderCell(right, top, topRight, object.color);
+                            this.paintRenderCell(left, bottom, bottomLeft, object.color);
+                            this.paintRenderCell(right, bottom, bottomRight, object.color);
+                            for (let x = left + 1; x < right; x += 1) {
+                                this.paintRenderCell(x, top, horizontal, object.color);
+                                this.paintRenderCell(x, bottom, horizontal, object.color);
+                            }
+                            this.paintRenderCell(left, top + 1, vertical, object.color);
+                            this.paintRenderCell(right, top + 1, vertical, object.color);
+                        }
+                    }
+                    for (const [index, segment] of splitGraphemes(object.content).entries()) {
+                        this.paintRenderCell(contentOrigin.x + index, contentOrigin.y, segment, object.color);
+                    }
+                    break;
+                }
+            }
+        }
+        this.sceneDirty = false;
+    }
+    /** Writes a normalized character and color into the cached render canvas. */
+    paintRenderCell(x, y, char, color) {
+        if (!this.isInsideCanvas(x, y))
+            return;
+        this.renderCanvas[y][x] = normalizeCellCharacter(char);
+        this.renderCanvasColors[y][x] = color;
+    }
+    /** Returns the composed box-drawing glyph for the connection grid at a cell. */
+    getConnectionGlyph(x, y) {
+        return getConnectionGlyphForGrid(this.renderConnections, x, y, this.canvasWidth, this.canvasHeight);
+    }
+    /** Builds the preview overlay for an in-progress line or elbow drag. */
+    getLinePreviewCharacters() {
+        const preview = new Map();
+        if (!this.pendingLine)
+            return preview;
+        const rendered = this.mode === "elbow"
+            ? getElbowRenderCharacters(this.pendingLine.start, this.pendingLine.end, this.elbowLineStyle, this.pendingLine.orientation)
+            : getLineRenderCharacters(this.pendingLine.start, this.pendingLine.end, this.lineStyle);
+        for (const [key, char] of rendered) {
+            const { x, y } = pointFromKey(key);
+            if (!this.isInsideCanvas(x, y))
+                continue;
+            preview.set(key, char);
+        }
+        return preview;
+    }
+    /** Builds the preview overlay for an in-progress paint stroke. */
+    getPaintPreviewCharacters() {
+        const preview = new Map();
+        if (!this.pendingPaint)
+            return preview;
+        for (const point of this.pendingPaint.points) {
+            if (!this.isInsideCanvas(point.x, point.y))
+                continue;
+            preview.set(`${point.x},${point.y}`, this.brush);
+        }
+        return preview;
+    }
+    /** Builds the preview overlay for an in-progress box drag. */
+    getBoxPreviewCharacters() {
+        const preview = new Map();
+        if (!this.pendingBox)
+            return preview;
+        const rect = normalizeRect(this.pendingBox.start, this.pendingBox.end);
+        const style = this.resolveBoxConnectionStyle(rect, this.boxStyle);
+        const { horizontal, vertical, topLeft, topRight, bottomLeft, bottomRight } = getBoxBorderGlyphs(style);
+        const setPreview = (x, y, value) => {
+            if (!this.isInsideCanvas(x, y))
+                return;
+            preview.set(`${x},${y}`, value);
+        };
+        for (let x = rect.left; x <= rect.right; x += 1) {
+            setPreview(x, rect.top, horizontal);
+            setPreview(x, rect.bottom, horizontal);
+        }
+        for (let y = rect.top; y <= rect.bottom; y += 1) {
+            setPreview(rect.left, y, vertical);
+            setPreview(rect.right, y, vertical);
+        }
+        setPreview(rect.left, rect.top, topLeft);
+        setPreview(rect.right, rect.top, topRight);
+        setPreview(rect.left, rect.bottom, bottomLeft);
+        setPreview(rect.right, rect.bottom, bottomRight);
+        return preview;
+    }
+    /** Normalizes auto box styling into a concrete connection style. */
+    resolveBoxConnectionStyle(rect, style, ignoreId) {
+        if (style === "auto") {
+            return this.getAutoBoxConnectionStyle(rect, ignoreId);
+        }
+        return style;
+    }
+    /** Returns whether a concrete box style should render as a manual dashed perimeter. */
+    isDashedBoxStyle(style) {
+        return style === "dashed";
+    }
+    /** Alternates auto box weight based on nesting depth inside other boxes. */
+    getAutoBoxConnectionStyle(rect, ignoreId) {
+        const depth = this.objects.filter((object) => {
+            if (object.type !== "box")
+                return false;
+            if (object.id === ignoreId)
+                return false;
+            return (rect.left > object.left &&
+                rect.right < object.right &&
+                rect.top > object.top &&
+                rect.bottom < object.bottom);
+        }).length;
+        return depth % 2 === 0 ? "heavy" : "light";
+    }
+    /** Looks up an object by id. */
+    getObjectById(id) {
+        return this.objects.find((object) => object.id === id) ?? null;
+    }
+    /** Returns whether the given object id is currently selected. */
+    isObjectSelected(id) {
+        return this.selectedObjectIds.includes(id) || this.selectedObjectId === id;
+    }
+    /** Returns the primary selected object when one exists. */
+    getSelectedObject() {
+        if (!this.selectedObjectId)
+            return null;
+        return this.getObjectById(this.selectedObjectId);
+    }
+    /** Returns the selected objects in stable selection order. */
+    getSelectedObjects() {
+        const ids = this.selectedObjectIds.length > 0
+            ? this.selectedObjectIds
+            : this.selectedObjectId
+                ? [this.selectedObjectId]
+                : [];
+        return ids
+            .map((id) => this.getObjectById(id))
+            .filter((object) => object !== null);
+    }
+    /** Returns selected objects that are not descendants of other selected objects. */
+    getSelectedRootObjects() {
+        const selectedIds = new Set(this.selectedObjectIds);
+        return this.getSelectedObjects().filter((object) => {
+            let parentId = object.parentId;
+            while (parentId) {
+                if (selectedIds.has(parentId)) {
+                    return false;
+                }
+                parentId = this.getObjectById(parentId)?.parentId ?? null;
+            }
+            return true;
+        });
+    }
+    /** Returns the full object trees rooted at the selected top-level objects. */
+    getSelectedObjectTrees() {
+        const treeIds = new Set();
+        for (const object of this.getSelectedRootObjects()) {
+            for (const treeObject of this.getObjectTree(object.id)) {
+                treeIds.add(treeObject.id);
+            }
+        }
+        return this.objects.filter((object) => treeIds.has(object.id));
+    }
+    /** Returns the object tree that should move when the given object is dragged. */
+    getMoveSelectionForObject(object) {
+        if (!this.isObjectSelected(object.id) || this.selectedObjectIds.length <= 1) {
+            return this.getObjectTree(object.id);
+        }
+        return this.getSelectedObjectTrees();
+    }
+    /** Returns the text object currently being edited, if any. */
+    getActiveTextObject() {
+        if (!this.activeTextObjectId)
+            return null;
+        const object = this.getObjectById(this.activeTextObjectId);
+        return object?.type === "text" ? object : null;
+    }
+    /** Returns the object identified by `id` plus all of its descendants. */
+    getObjectTree(id, objects = this.objects) {
+        const descendants = new Set([id]);
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const object of objects) {
+                if (object.parentId && descendants.has(object.parentId) && !descendants.has(object.id)) {
+                    descendants.add(object.id);
+                    changed = true;
+                }
+            }
+        }
+        return objects.filter((object) => descendants.has(object.id));
+    }
+    /** Reassigns parent boxes so each object belongs to the smallest containing box. */
+    recomputeParentAssignments(objects) {
+        return objects.map((object) => {
+            const bounds = getObjectBounds(object);
+            // Prefer the smallest containing box so nested boxes form the parent tree users expect.
+            const candidates = objects
+                .filter((candidate) => candidate.type === "box" && candidate.id !== object.id)
+                .filter((candidate) => rectContainsRect(getBoxContentBounds(candidate), bounds))
+                .sort((a, b) => getRectArea(getBoxContentBounds(a)) - getRectArea(getBoxContentBounds(b)) || a.z - b.z);
+            return {
+                ...object,
+                parentId: candidates[0]?.id ?? null,
+            };
+        });
+    }
+    /** Replaces the scene object list and refreshes dependent selection and render state. */
+    setObjects(nextObjects) {
+        this.objects = this.recomputeParentAssignments(nextObjects);
+        this.syncSelection();
+        this.markSceneDirty();
+    }
+    /** Replaces a single object in the scene by id. */
+    replaceObject(nextObject) {
+        this.replaceObjects([nextObject]);
+    }
+    /** Replaces multiple objects in the scene by id. */
+    replaceObjects(nextObjects) {
+        const replacementMap = new Map(nextObjects.map((object) => [object.id, object]));
+        this.setObjects(this.objects.map((object) => replacementMap.get(object.id) ?? object));
+    }
+    /** Removes a single object from the scene. */
+    removeObjectById(id) {
+        this.setObjects(this.objects.filter((object) => object.id !== id));
+    }
+    /** Updates multi-selection state while preserving a valid primary selection. */
+    setSelectedObjects(ids, primaryId = ids.at(-1) ?? null) {
+        const existingIds = new Set(this.objects.map((object) => object.id));
+        const nextIds = [...new Set(ids)].filter((id) => existingIds.has(id));
+        this.selectedObjectIds = nextIds;
+        this.selectedObjectId =
+            primaryId && nextIds.includes(primaryId) ? primaryId : (nextIds.at(-1) ?? null);
+        if (this.activeTextObjectId !== null &&
+            (nextIds.length !== 1 || this.activeTextObjectId !== this.selectedObjectId)) {
+            this.activeTextObjectId = null;
+        }
+    }
+    /** Drops dangling selection references after scene changes. */
+    syncSelection() {
+        const existingIds = new Set(this.objects.map((object) => object.id));
+        this.selectedObjectIds = this.selectedObjectIds.filter((id) => existingIds.has(id));
+        if (this.selectedObjectId && !existingIds.has(this.selectedObjectId)) {
+            this.selectedObjectId = null;
+        }
+        if (this.selectedObjectId && !this.selectedObjectIds.includes(this.selectedObjectId)) {
+            this.selectedObjectIds.push(this.selectedObjectId);
+        }
+        if (this.selectedObjectIds.length === 0) {
+            this.selectedObjectId = null;
+        }
+        else if (!this.selectedObjectId) {
+            this.selectedObjectId = this.selectedObjectIds.at(-1) ?? null;
+        }
+        if (this.activeTextObjectId !== null &&
+            (!existingIds.has(this.activeTextObjectId) ||
+                this.selectedObjectIds.length !== 1 ||
+                this.activeTextObjectId !== this.selectedObjectId)) {
+            this.activeTextObjectId = null;
+        }
+    }
+    /** Finds the topmost resize or endpoint handle at a canvas cell. */
+    findTopmostHandleAt(x, y) {
+        const indexedObjects = this.objects.map((object, index) => ({ object, index }));
+        indexedObjects.sort((a, b) => b.object.z - a.object.z || b.index - a.index);
+        for (const { object } of indexedObjects) {
+            if (object.type === "box") {
+                for (const [handle, point] of Object.entries(getBoxCornerPoints(object))) {
+                    if (point.x === x && point.y === y) {
+                        return { kind: "box-corner", object, handle };
+                    }
+                }
+            }
+            if (object.type === "line" || object.type === "elbow") {
+                for (const [endpoint, point] of Object.entries(getLineEndpointPoints(object))) {
+                    if (point.x === x && point.y === y) {
+                        return { kind: "line-endpoint", object, endpoint };
+                    }
+                }
+            }
+        }
+        return null;
+    }
+    /** Finds the topmost object occupying a canvas cell. */
+    findTopmostObjectAt(x, y) {
+        const hit = this.findTopmostObjectHitAt(x, y);
+        return hit?.object ?? null;
+    }
+    /** Finds the topmost object hit and whether the click landed on text content. */
+    findTopmostObjectHitAt(x, y) {
+        const indexedObjects = this.objects.map((object, index) => ({ object, index }));
+        indexedObjects.sort((a, b) => b.object.z - a.object.z || b.index - a.index);
+        for (const { object } of indexedObjects) {
+            if (object.type === "text") {
+                const contentOrigin = getTextContentOrigin(object);
+                const onTextContent = y === contentOrigin.y &&
+                    x >= contentOrigin.x &&
+                    x < contentOrigin.x + visibleCellCount(object.content);
+                const inSelectedTextBounds = object.id === this.selectedObjectId &&
+                    rectContainsPoint(getTextSelectionBounds(object), x, y);
+                if (onTextContent || inSelectedTextBounds) {
+                    return { object, onTextContent };
+                }
+                continue;
+            }
+            if (objectContainsPoint(object, x, y)) {
+                return { object, onTextContent: false };
+            }
+        }
+        return null;
+    }
+    /** Returns every object whose selection bounds intersect the marquee. */
+    getObjectsWithinSelectionRect(rect) {
+        return this.objects.filter((object) => rectsIntersect(getObjectSelectionBounds(object), rect));
+    }
+    /** Translates an object while clamping it inside the canvas bounds. */
+    translateObjectWithinCanvas(object, desiredDx, desiredDy) {
+        const bounds = getObjectBounds(object);
+        const minDx = -bounds.left;
+        const maxDx = this.canvasWidth - 1 - bounds.right;
+        const minDy = -bounds.top;
+        const maxDy = this.canvasHeight - 1 - bounds.bottom;
+        const dx = minDx <= maxDx ? clamp(desiredDx, minDx, maxDx) : desiredDx;
+        const dy = minDy <= maxDy ? clamp(desiredDy, minDy, maxDy) : desiredDy;
+        return translateObject(object, dx, dy);
+    }
+    /** Translates an object tree while clamping the entire group inside the canvas. */
+    translateObjectTreeWithinCanvas(objects, desiredDx, desiredDy) {
+        const bounds = getBoundsUnion(objects);
+        if (!bounds)
+            return objects;
+        const minDx = -bounds.left;
+        const maxDx = this.canvasWidth - 1 - bounds.right;
+        const minDy = -bounds.top;
+        const maxDy = this.canvasHeight - 1 - bounds.bottom;
+        const dx = minDx <= maxDx ? clamp(desiredDx, minDx, maxDx) : desiredDx;
+        const dy = minDy <= maxDy ? clamp(desiredDy, minDy, maxDy) : desiredDy;
+        return objects.map((object) => translateObject(object, dx, dy));
+    }
+    /** Resizes a box from one handle while keeping it inside the canvas. */
+    resizeBoxWithinCanvas(box, handle, point) {
+        const anchor = this.getOppositeBoxCorner(box, handle);
+        const clampedPoint = this.clampPointInsideCanvas(point);
+        const safePoint = this.ensureBoxDoesNotCollapse(anchor, clampedPoint);
+        const rect = normalizeRect(anchor, safePoint);
+        return {
+            ...box,
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+    }
+    /** Resizes a box and remaps its descendants into the resized content area. */
+    resizeObjectTreeWithinCanvas(originalObjects, originalBox, handle, point) {
+        const resizedBox = this.resizeBoxWithinCanvas(originalBox, handle, point);
+        const originalContentBounds = getBoxContentBounds(originalBox);
+        const nextContentBounds = getBoxContentBounds(resizedBox);
+        return originalObjects.map((object) => {
+            if (object.id === originalBox.id) {
+                return resizedBox;
+            }
+            return this.transformObjectForResizedParent(object, originalContentBounds, nextContentBounds);
+        });
+    }
+    /** Remaps a child object from one parent-content rectangle into another. */
+    transformObjectForResizedParent(object, originalContentBounds, nextContentBounds) {
+        if (!isValidRect(originalContentBounds) || !isValidRect(nextContentBounds)) {
+            return object;
+        }
+        switch (object.type) {
+            case "line":
+            case "elbow": {
+                const start = this.mapPointBetweenRects({ x: object.x1, y: object.y1 }, originalContentBounds, nextContentBounds);
+                const end = this.mapPointBetweenRects({ x: object.x2, y: object.y2 }, originalContentBounds, nextContentBounds);
+                return {
+                    ...object,
+                    x1: start.x,
+                    y1: start.y,
+                    x2: end.x,
+                    y2: end.y,
+                };
+            }
+            case "paint": {
+                const mappedPoints = object.points.map((point) => this.mapPointBetweenRects(point, originalContentBounds, nextContentBounds));
+                return {
+                    ...object,
+                    points: mergeUniquePoints([], mappedPoints),
+                };
+            }
+            case "text": {
+                const mapped = this.mapPointBetweenRects({ x: object.x, y: object.y }, originalContentBounds, nextContentBounds);
+                return this.clampTextIntoRect({
+                    ...object,
+                    x: mapped.x,
+                    y: mapped.y,
+                }, nextContentBounds);
+            }
+            case "box": {
+                const topLeft = this.mapPointBetweenRects({ x: object.left, y: object.top }, originalContentBounds, nextContentBounds);
+                const bottomRight = this.mapPointBetweenRects({ x: object.right, y: object.bottom }, originalContentBounds, nextContentBounds);
+                const rect = normalizeRect(topLeft, bottomRight);
+                return {
+                    ...object,
+                    left: rect.left,
+                    top: rect.top,
+                    right: rect.right,
+                    bottom: rect.bottom,
+                };
+            }
+        }
+    }
+    /** Maps a point proportionally from one rectangle into another. */
+    mapPointBetweenRects(point, from, to) {
+        return {
+            x: this.mapAxisBetweenRanges(point.x, from.left, from.right, to.left, to.right),
+            y: this.mapAxisBetweenRanges(point.y, from.top, from.bottom, to.top, to.bottom),
+        };
+    }
+    /** Maps a scalar value proportionally between two inclusive ranges. */
+    mapAxisBetweenRanges(value, fromStart, fromEnd, toStart, toEnd) {
+        if (fromStart === fromEnd) {
+            return toStart;
+        }
+        // Preserve the child's relative position within the old range when remapping into the new one.
+        const ratio = (value - fromStart) / (fromEnd - fromStart);
+        const mapped = Math.round(toStart + ratio * (toEnd - toStart));
+        const min = Math.min(toStart, toEnd);
+        const max = Math.max(toStart, toEnd);
+        return clamp(mapped, min, max);
+    }
+    /** Keeps a text object fully inside a target rectangle after remapping. */
+    clampTextIntoRect(text, rect) {
+        if (!isValidRect(rect))
+            return text;
+        const renderRect = getTextRenderRect(text);
+        const width = renderRect.right - renderRect.left + 1;
+        const height = renderRect.bottom - renderRect.top + 1;
+        const minX = rect.left;
+        const maxX = rect.right - width + 1;
+        const minY = rect.top;
+        const maxY = rect.bottom - height + 1;
+        return {
+            ...text,
+            x: maxX >= minX ? clamp(text.x, minX, maxX) : rect.left,
+            y: maxY >= minY ? clamp(text.y, minY, maxY) : rect.top,
+        };
+    }
+    /** Moves one endpoint of a line while honoring canvas bounds and axis constraints. */
+    adjustLineEndpointWithinCanvas(line, endpoint, point, constrainLineAxis = false) {
+        const clampedPoint = this.clampPointInsideCanvas(point);
+        const anchor = endpoint === "start" ? { x: line.x2, y: line.y2 } : { x: line.x1, y: line.y1 };
+        const nextPoint = constrainLineAxis && line.type !== "elbow"
+            ? constrainLinePoint(anchor, clampedPoint)
+            : clampedPoint;
+        const orientation = line.type === "elbow" && constrainLineAxis
+            ? "vertical-first"
+            : line.type === "elbow"
+                ? line.orientation
+                : undefined;
+        if (endpoint === "start") {
+            return {
+                ...line,
+                x1: nextPoint.x,
+                y1: nextPoint.y,
+                ...(orientation ? { orientation } : {}),
+            };
+        }
+        return {
+            ...line,
+            x2: nextPoint.x,
+            y2: nextPoint.y,
+            ...(orientation ? { orientation } : {}),
+        };
+    }
+    /** Returns the fixed anchor corner opposite the dragged resize handle. */
+    getOppositeBoxCorner(box, handle) {
+        switch (handle) {
+            case "top-left":
+                return { x: box.right, y: box.bottom };
+            case "top-right":
+                return { x: box.left, y: box.bottom };
+            case "bottom-left":
+                return { x: box.right, y: box.top };
+            case "bottom-right":
+                return { x: box.left, y: box.top };
+        }
+    }
+    /** Clamps a point into the current canvas bounds. */
+    clampPointInsideCanvas(point) {
+        return {
+            x: clamp(point.x, 0, this.canvasWidth - 1),
+            y: clamp(point.y, 0, this.canvasHeight - 1),
+        };
+    }
+    /** Adjusts a resized box point so the box never collapses to a single cell. */
+    ensureBoxDoesNotCollapse(anchor, point) {
+        if (anchor.x !== point.x || anchor.y !== point.y) {
+            return point;
+        }
+        if (point.x > 0) {
+            return { x: point.x - 1, y: point.y };
+        }
+        if (point.x < this.canvasWidth - 1) {
+            return { x: point.x + 1, y: point.y };
+        }
+        if (point.y > 0) {
+            return { x: point.x, y: point.y - 1 };
+        }
+        if (point.y < this.canvasHeight - 1) {
+            return { x: point.x, y: point.y + 1 };
+        }
+        return point;
+    }
+    /** Shifts an object just enough to bring it fully back inside the canvas. */
+    shiftObjectInsideCanvas(object) {
+        const bounds = getObjectBounds(object);
+        let dx = 0;
+        let dy = 0;
+        if (bounds.left < 0) {
+            dx = -bounds.left;
+        }
+        else if (bounds.right >= this.canvasWidth) {
+            dx = this.canvasWidth - 1 - bounds.right;
+        }
+        if (bounds.top < 0) {
+            dy = -bounds.top;
+        }
+        else if (bounds.bottom >= this.canvasHeight) {
+            dy = this.canvasHeight - 1 - bounds.bottom;
+        }
+        return translateObject(object, dx, dy);
+    }
+    bringObjectToFront(object) {
+        return {
+            ...object,
+            z: this.allocateZIndex(),
+        };
+    }
+    /** Brings a group of objects to the front while preserving their relative stacking order. */
+    bringObjectsToFront(objects) {
+        const byId = new Map();
+        for (const object of [...objects].sort((a, b) => a.z - b.z || a.id.localeCompare(b.id))) {
+            byId.set(object.id, this.bringObjectToFront(object));
+        }
+        return objects.map((object) => byId.get(object.id) ?? object);
+    }
+    /** Allocates the next stable object id. */
+    createObjectId() {
+        const id = `obj-${this.nextObjectNumber}`;
+        this.nextObjectNumber += 1;
+        return id;
+    }
+    /** Allocates the next topmost z-index. */
+    allocateZIndex() {
+        const z = this.nextZIndex;
+        this.nextZIndex += 1;
+        return z;
+    }
+    /** Derives the next stable `obj-N` identifier after loading a document. */
+    getNextDocumentObjectNumber(objects) {
+        let maxNumber = 0;
+        for (const object of objects) {
+            const match = /^obj-(\d+)$/.exec(object.id);
+            if (!match)
+                continue;
+            const parsed = Number.parseInt(match[1], 10);
+            if (Number.isInteger(parsed)) {
+                maxNumber = Math.max(maxNumber, parsed);
+            }
+        }
+        return Math.max(1, maxNumber + 1, objects.length + 1);
+    }
+    /** Derives the next z-index after loading a document. */
+    getNextDocumentZIndex(objects) {
+        const maxZ = objects.reduce((currentMax, object) => Math.max(currentMax, object.z), 0);
+        return Math.max(1, maxZ + 1);
+    }
+    /** Formats rectangle bounds for user-facing status text. */
+    describeRect(rect) {
+        return `${rect.left + 1},${rect.top + 1} → ${rect.right + 1},${rect.bottom + 1}`;
+    }
+    /** Converts the elbow modifier key into a route orientation. */
+    getElbowOrientationFromModifier(shiftPressed) {
+        return shiftPressed ? "vertical-first" : this.elbowOrientation;
+    }
+    /** Formats an elbow route orientation for user-facing status text. */
+    describeElbowOrientation(orientation) {
+        return orientation === "vertical-first" ? "vertical-first" : "horizontal-first";
+    }
+    /** Formats a line style label for user-facing status text. */
+    describeLineStyle(style) {
+        switch (style) {
+            case "smooth":
+                return "Smooth";
+            case "light":
+                return "Single";
+            case "double":
+                return "Double";
+            case "dashed":
+                return "Dashed";
+        }
+    }
+    /** Formats a box style label for user-facing status text. */
+    describeBoxStyle(style) {
+        switch (style) {
+            case "auto":
+                return "Auto";
+            case "light":
+                return "Single";
+            case "heavy":
+                return "Heavy";
+            case "double":
+                return "Double";
+            case "dashed":
+                return "Dashed";
+        }
+    }
+    /** Formats a text border label for user-facing status text. */
+    describeTextBorderMode(mode) {
+        switch (mode) {
+            case "none":
+                return "No border";
+            case "single":
+                return "Single";
+            case "double":
+                return "Double";
+            case "underline":
+                return "Underline";
+        }
+    }
+    /** Formats an ink color label for user-facing status text. */
+    describeInkColor(color) {
+        switch (color) {
+            case "white":
+                return "white";
+            case "red":
+                return "red";
+            case "orange":
+                return "orange";
+            case "yellow":
+                return "yellow";
+            case "green":
+                return "green";
+            case "cyan":
+                return "cyan";
+            case "blue":
+                return "blue";
+            case "magenta":
+                return "magenta";
+        }
+    }
+    /** Formats an object description for user-facing status text. */
+    describeObject(object) {
+        switch (object.type) {
+            case "box":
+                return `box ${this.describeRect(object)}`;
+            case "line":
+                return `line ${object.x1 + 1},${object.y1 + 1} → ${object.x2 + 1},${object.y2 + 1}`;
+            case "elbow":
+                return `elbow ${object.x1 + 1},${object.y1 + 1} → ${object.x2 + 1},${object.y2 + 1}`;
+            case "paint": {
+                const bounds = getObjectBounds(object);
+                return `brush stroke ${this.describeRect(bounds)}`;
+            }
+            case "text":
+                return `text "${object.content}" at ${object.x + 1},${object.y + 1}`;
+        }
+    }
+    /** Returns whether two objects have equivalent editable state. */
+    objectsEqual(a, b) {
+        if (a.type !== b.type)
+            return false;
+        if (a.parentId !== b.parentId)
+            return false;
+        if (a.color !== b.color)
+            return false;
+        switch (a.type) {
+            case "box":
+                return (a.left === b.left &&
+                    a.right === b.right &&
+                    a.top === b.top &&
+                    a.bottom === b.bottom &&
+                    a.style === b.style);
+            case "line":
+                return (a.x1 === b.x1 &&
+                    a.y1 === b.y1 &&
+                    a.x2 === b.x2 &&
+                    a.y2 === b.y2 &&
+                    a.style === b.style);
+            case "elbow":
+                return (a.x1 === b.x1 &&
+                    a.y1 === b.y1 &&
+                    a.x2 === b.x2 &&
+                    a.y2 === b.y2 &&
+                    a.style === b.style &&
+                    a.orientation === b.orientation);
+            case "paint":
+                return (a.brush === b.brush && pointsEqual(a.points, b.points));
+            case "text":
+                return (a.x === b.x &&
+                    a.y === b.y &&
+                    a.content === b.content &&
+                    a.border === b.border);
+        }
+    }
+    /** Returns whether two object lists are equal by id and editable state. */
+    objectListsEqual(a, b) {
+        if (a.length !== b.length)
+            return false;
+        const byId = new Map(b.map((object) => [object.id, object]));
+        return a.every((object) => {
+            const other = byId.get(object.id);
+            return other ? this.objectsEqual(object, other) : false;
+        });
+    }
+    /** Returns whether a canvas coordinate is inside the drawable area. */
+    isInsideCanvas(x, y) {
+        return x >= 0 && y >= 0 && x < this.canvasWidth && y < this.canvasHeight;
+    }
+    /** Marks cached render buffers as stale. */
+    markSceneDirty() {
+        this.sceneDirty = true;
+    }
+    /** Updates the user-facing status message. */
+    setStatus(message) {
+        this.status = message;
+    }
+}

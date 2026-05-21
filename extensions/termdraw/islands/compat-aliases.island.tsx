@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/react */
 
-import { useIslandBridge, useOpenTuiIslandBridge } from "opentui-island";
+import { useIslandBridge, useOpenTuiIslandBridge } from "../opentui-island/index.js";
 import { useEffect } from "react";
 
 type CompatAliasesIslandProps = {
