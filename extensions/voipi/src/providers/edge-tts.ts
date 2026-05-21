@@ -1,0 +1,277 @@
+// https://github.com/SchneeHertz/node-edge-tts
+// Copyright (c) 2022 SchneeHertz (MIT License)
+
+import type { SpeakOptions, Voice } from "../types.ts";
+import { BaseVoiceProvider, type AudioData } from "../_provider.ts";
+import { detectLanguage } from "../_lang.ts";
+import { resolveVoice } from "../_utils.ts";
+import { WebSocket } from "../_ws.ts";
+
+export interface EdgeTTSOptions {
+  /** Default voice (e.g. "en-US-AvaNeural") */
+  voice?: string;
+  /** Prosody rate string (e.g. "+50%", "-20%", "default") */
+  rate?: string;
+  /** Prosody pitch string (e.g. "+10Hz", "default") */
+  pitch?: string;
+  /** Prosody volume string (e.g. "+20%", "default") */
+  volume?: string;
+  /** Audio output format */
+  outputFormat?: string;
+}
+
+export class EdgeTTS extends BaseVoiceProvider {
+  name = "edge-tts";
+
+  private defaultVoice: string;
+  private defaultRate: string;
+  private defaultPitch: string;
+  private defaultVolume: string;
+  private outputFormat: string;
+
+  override getDefaults() {
+    return { voice: this.defaultVoice, rate: this.defaultRate };
+  }
+
+  // Edge TTS voices follow the pattern: locale-VoiceNameNeural
+  override hasVoice(id: string): boolean {
+    return /^[a-z]{2,3}(-[A-Z][A-Za-z]+)+-.+Neural$/.test(id);
+  }
+
+  constructor(options?: EdgeTTSOptions) {
+    super();
+    this.defaultVoice = options?.voice ?? "en-US-AvaNeural";
+    this.defaultRate = options?.rate ?? "default";
+    this.defaultPitch = options?.pitch ?? "default";
+    this.defaultVolume = options?.volume ?? "default";
+    this.outputFormat = options?.outputFormat ?? "audio-24khz-48kbitrate-mono-mp3";
+  }
+
+  defaultVoiceForLanguage(lang: string): string | undefined {
+    return LANG_VOICES[lang];
+  }
+
+  override async synthesize(text: string, speakOpts?: SpeakOptions): Promise<AudioData> {
+    const voice =
+      (await resolveVoice(speakOpts?.voice, () => this.listVoices(), (id) => this.hasVoice(id))) ??
+      this.defaultVoiceForLanguage(speakOpts?.lang ?? detectLanguage(text)) ??
+      this.defaultVoice;
+    const rate = speakOpts?.rate != null ? rateToString(speakOpts.rate) : this.defaultRate;
+
+    const data = await edgeSynthesize(
+      text,
+      voice,
+      rate,
+      this.defaultPitch,
+      this.defaultVolume,
+      this.outputFormat,
+      speakOpts?.signal,
+    );
+    return { data, ext: ".mp3" };
+  }
+
+  override async listVoices(): Promise<Voice[]> {
+    const res = await fetch(VOICES_URL);
+    const data = (await res.json()) as Array<{
+      ShortName: string;
+      FriendlyName: string;
+      Locale: string;
+    }>;
+    return data.map((v) => ({
+      id: v.ShortName,
+      name: v.FriendlyName,
+      lang: v.Locale,
+    }));
+  }
+}
+
+// ---- internals ----
+
+const LANG_VOICES: Record<string, string> = {
+  ar: "ar-SA-HamedNeural",
+  bn: "bn-IN-TanishaaNeural",
+  cs: "cs-CZ-VlastaNeural",
+  da: "da-DK-ChristelNeural",
+  de: "de-DE-KatjaNeural",
+  el: "el-GR-AthinaNeural",
+  es: "es-ES-ElviraNeural",
+  fa: "fa-IR-DilaraNeural",
+  fr: "fr-FR-DeniseNeural",
+  gu: "gu-IN-DhwaniNeural",
+  he: "he-IL-HilaNeural",
+  hi: "hi-IN-SwaraNeural",
+  ja: "ja-JP-NanamiNeural",
+  km: "km-KH-SreymomNeural",
+  kn: "kn-IN-SapnaNeural",
+  ko: "ko-KR-SunHiNeural",
+  ml: "ml-IN-SobhanaNeural",
+  my: "my-MM-NilarNeural",
+  no: "nb-NO-PernilleNeural",
+  pl: "pl-PL-AgnieszkaNeural",
+  pt: "pt-BR-FranciscaNeural",
+  ro: "ro-RO-AlinaNeural",
+  ru: "ru-RU-SvetlanaNeural",
+  sk: "sk-SK-ViktoriaNeural",
+  sv: "sv-SE-SofieNeural",
+  ta: "ta-IN-PallaviNeural",
+  te: "te-IN-ShrutiNeural",
+  th: "th-TH-PremwadeeNeural",
+  tr: "tr-TR-EmelNeural",
+  ur: "ur-PK-UzmaNeural",
+  vi: "vi-VN-HoaiMyNeural",
+  zh: "zh-CN-XiaoxiaoNeural",
+};
+
+export const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+export const CHROMIUM_FULL_VERSION = "143.0.3650.75";
+
+const WINDOWS_FILE_TIME_EPOCH = 11_644_473_600n;
+
+function rateToString(rate: number): string {
+  const pct = Math.round((rate - 1) * 100);
+  return pct >= 0 ? `+${pct}%` : `${pct}%`;
+}
+
+async function edgeSynthesize(
+  text: string,
+  voice: string,
+  rate: string,
+  pitch: string,
+  volume: string,
+  outputFormat: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  signal?.throwIfAborted();
+  const chromeMajor = CHROMIUM_FULL_VERSION.split(".")[0];
+  const wsUrl = await buildWsUrl();
+  const socket = await WebSocket.connect(wsUrl, {
+    host: "speech.platform.bing.com",
+    origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
+    "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36 Edg/${chromeMajor}.0.0.0`,
+  }).catch((error) => {
+    throw _formatEdgeError(error);
+  });
+
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const onAbort = () => {
+      socket.close();
+      reject(signal?.reason ?? new Error("Aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const settle = (fn: () => void) => {
+      signal?.removeEventListener("abort", onAbort);
+      fn();
+    };
+
+    socket.send(
+      `Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"${outputFormat}"}}}}`,
+    );
+
+    const requestId = randomHex(16);
+    const ssml = buildSsml(text, voice, rate, pitch, volume);
+    socket.send(
+      `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n${ssml}`,
+    );
+
+    socket.onmessage = ({ data, isBinary }) => {
+      if (isBinary) {
+        const separator = "Path:audio\r\n";
+        const idx = data.indexOf(separator);
+        if (idx !== -1) {
+          chunks.push(data.subarray(idx + separator.length));
+        }
+      } else {
+        const msg = data.toString();
+        if (msg.includes("Path:turn.end")) {
+          socket.close();
+          settle(() => resolve(Buffer.concat(chunks)));
+        }
+      }
+    };
+
+    socket.onerror = (err) => {
+      settle(() => reject(_formatEdgeError(err)));
+    };
+  });
+}
+
+function toHex(bytes: ArrayBuffer | Uint8Array): string {
+  return [...new Uint8Array(bytes instanceof Uint8Array ? bytes.buffer : bytes)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function randomHex(length: number): string {
+  return toHex(crypto.getRandomValues(new Uint8Array(length)));
+}
+
+export async function generateSecMsGecToken(): Promise<string> {
+  const ticks =
+    BigInt(Math.floor(Date.now() / 1000 + Number(WINDOWS_FILE_TIME_EPOCH))) * 10_000_000n;
+  const roundedTicks = ticks - (ticks % 3_000_000_000n);
+  const data = new TextEncoder().encode(`${roundedTicks}${TRUSTED_CLIENT_TOKEN}`);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return toHex(hash).toUpperCase();
+}
+
+export async function buildWsUrl(): Promise<string> {
+  const token = await generateSecMsGecToken();
+  return `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${token}&Sec-MS-GEC-Version=1-${CHROMIUM_FULL_VERSION}`;
+}
+
+export const VOICES_URL = `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${TRUSTED_CLIENT_TOKEN}`;
+
+export function escapeXml(str: string): string {
+  return str.replace(/[<>&"']/g, (c) => {
+    switch (c) {
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case "&":
+        return "&amp;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&apos;";
+      default:
+        return c;
+    }
+  });
+}
+
+export function buildSsml(
+  text: string,
+  voice: string,
+  rate: string,
+  pitch: string,
+  volume: string,
+): string {
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US">
+  <voice name="${escapeXml(voice)}">
+    <prosody rate="${escapeXml(rate)}" pitch="${escapeXml(pitch)}" volume="${escapeXml(volume)}">
+      ${escapeXml(text)}
+    </prosody>
+  </voice>
+</speak>`;
+}
+
+function _formatEdgeError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/getaddrinfo\s+EAI_AGAIN\s+speech\.platform\.bing\.com/i.test(message)) {
+    return new Error(
+      "Edge TTS DNS lookup failed for speech.platform.bing.com. Network access or DNS resolution is unavailable right now.",
+    );
+  }
+  if (/getaddrinfo\s+ENOTFOUND\s+speech\.platform\.bing\.com/i.test(message)) {
+    return new Error(
+      "Edge TTS could not resolve speech.platform.bing.com. Check DNS, firewall, or internet connectivity.",
+    );
+  }
+  if (/speech\.platform\.bing\.com/i.test(message)) {
+    return new Error(`Edge TTS network error: ${message}`);
+  }
+  if (/WebSocket error/i.test(message)) return new Error(message);
+  return new Error(`Edge TTS error: ${message}`);
+}

@@ -4,6 +4,23 @@
 - This is "my" agent-stuff
 - Although I would never marry any solution, pi.dev is mostly my daily driver now
 
+## Layout
+
+This follows the same broad shape as Armin's `agent-stuff` repo: first-class `extensions/`, `skills/`, and `commands/` directories loaded by the `pi` manifest. Former third-party Pi packages now live directly in those directories rather than in a vendor package folder.
+
+See [upstream package sources](./docs/upstream-pi-packages.md) for provenance and license notes.
+
+## Pi Extensions
+
+| Extension | Description |
+| --- | --- |
+| [linear-mcp](./extensions/linear-mcp) | Mirror Linear's official hosted MCP server into Pi tools with dynamic `tools/list` registration. |
+| [ollama-web-search](./extensions/ollama-web-search.ts) | Local Ollama-backed `web_search` and `web_fetch` tools. |
+| [termdraw](./extensions/termdraw) | Open termDRAW inside a Pi overlay with `/termdraw`. |
+| [voipi](./extensions/voipi) | Text-to-speech tools and `/tts` commands. |
+| [subagents](./extensions/subagents) | Subagent orchestration tool, built-in agents, and related commands. |
+| [autoresearch](./extensions/autoresearch) | Experiment loop tools, dashboard, hooks, and autoresearch command. |
+
 ## Pi Skills
 
 | Skill | Description |
@@ -14,3 +31,7 @@
 | [made-to-stick](./skills/made-to-stick) | Apply the SUCCESs framework to make ideas, copy, and content more memorable. |
 | [mesh-security](./skills/mesh-security) | Analyze Istio, Consul, and Linkerd service mesh configurations for security issues and NIST control mappings. |
 | [mischief-managed](./skills/mischief-managed) | Capture a lean end-of-session note into an Obsidian vault with decisions, changes, validation, caveats, and follow-ups. |
+| [pi-subagents](./skills/pi-subagents) | Instructions for delegating work to the local subagent extension. |
+| [autoresearch-create](./skills/autoresearch-create) | Start an autonomous optimization experiment loop. |
+| [autoresearch-finalize](./skills/autoresearch-finalize) | Finalize autoresearch sessions into reviewable branches. |
+| [autoresearch-hooks](./skills/autoresearch-hooks) | Author pre/post iteration hooks for autoresearch. |

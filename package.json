@@ -9,14 +9,36 @@
     "pi",
     "codex",
     "security",
-    "grc"
+    "grc",
+    "pi-extension",
+    "subagents",
+    "autoresearch",
+    "tts",
+    "web-search",
+    "pi-skill",
+    "pi-prompt"
   ],
   "pi": {
+    "extensions": [
+      "./extensions"
+    ],
     "skills": [
       "./skills"
+    ],
+    "prompts": [
+      "./commands"
     ]
   },
   "dependencies": {
-    "js-yaml": "^4.1.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "js-yaml": "^4.1.0",
+    "@opentui/core": "0.1.97",
+    "@opentui/react": "0.1.97",
+    "@sinclair/typebox": "^0.34.41",
+    "@termdraw/opentui": "0.4.1",
+    "jiti": "^2.7.0",
+    "opentui-island": "^0.4.0",
+    "react": "^19.2.0",
+    "typebox": "^1.1.33"
   }
 }
