@@ -29,6 +29,11 @@
       "./commands"
     ]
   },
+  "scripts": {
+    "secrets:scan": "scripts/secret-scan.sh --working-tree",
+    "secrets:scan-history": "scripts/secret-scan.sh --all",
+    "secrets:install-hooks": "git config core.hooksPath .githooks"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "0.2.15",

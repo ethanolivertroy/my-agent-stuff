@@ -1,0 +1,22 @@
+title = "my-agent-stuff secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public Microsoft Edge TTS client token copied from upstream VoiPi"
+condition = "AND"
+paths = ['''^extensions/voipi/src/providers/edge-tts\.ts$''']
+regexes = ['''6A5AA1D4EAFF4E9FB37E23D68491D6F4''']
+
+[[allowlists]]
+description = "Intentional fake Terraform passwords in insecure IaC scanner fixture"
+condition = "AND"
+paths = ['''^skills/iac-security-scanner/examples/test-insecure\.tf$''']
+regexes = ['''supersecret123|password123''']
+
+[[allowlists]]
+description = "Terraform password_length argument documentation is not a secret value"
+condition = "AND"
+paths = ['''^skills/iac-security-scanner/references/aws/aws_iam_user_login_profile\.md$''']
+regexes = ['''20''']

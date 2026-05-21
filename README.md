@@ -10,6 +10,18 @@ This follows the same broad shape as Armin's `agent-stuff` repo: first-class `ex
 
 See [upstream package sources](./docs/upstream-pi-packages.md) for provenance and license notes.
 
+## Secret scanning
+
+This public repo uses Gitleaks via repo-managed Git hooks:
+
+```bash
+brew install gitleaks
+npm run secrets:install-hooks
+npm run secrets:scan
+```
+
+Installed hooks run a staged scan before commits and an outgoing-commit scan before pushes. Use `SKIP_SECRET_SCAN=1` only for emergency bypasses.
+
 ## Pi Extensions
 
 | Extension | Description |
