@@ -6,13 +6,13 @@ import {
   type Component,
   type TUI,
 } from "@earendil-works/pi-tui";
-import type { OpenTuiBridgeEvent } from "opentui-island";
+import type { OpenTuiBridgeEvent } from "./opentui-island/index.js";
 import {
   createPiTuiSurface,
   disablePiTuiMouseMode,
   enablePiTuiMouseMode,
   type PiTuiSurface,
-} from "opentui-island/pi-tui";
+} from "./opentui-island/adapters/pi-tui/index.js";
 
 const TERM_DRAW_ISLAND_MODULE_URL = new URL("./islands/termdraw.island.tsx", import.meta.url);
 const PI_FOOTER_TEXT =

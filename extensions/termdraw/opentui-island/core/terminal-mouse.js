@@ -1,0 +1,93 @@
+export const ENABLE_SGR_MOUSE_MODE = "\u001B[?1000h\u001B[?1002h\u001B[?1006h";
+export const DISABLE_SGR_MOUSE_MODE = "\u001B[?1000l\u001B[?1002l\u001B[?1006l";
+const ESCAPE = String.fromCharCode(27);
+const SGR_MOUSE_SEQUENCE_PATTERN = new RegExp(`^${ESCAPE}\\[<(\\d+);(\\d+);(\\d+)([Mm])$`);
+function parseMouseButton(code) {
+    const button = code & 3;
+    if (button === 0 || button === 1 || button === 2) {
+        return button;
+    }
+    return 0;
+}
+/** Parse one SGR mouse sequence into a zero-based host mouse event. */
+export function parseSgrMouseInput(data) {
+    const match = data.match(SGR_MOUSE_SEQUENCE_PATTERN);
+    if (!match) {
+        return undefined;
+    }
+    const code = Number.parseInt(match[1], 10);
+    const x = Number.parseInt(match[2], 10) - 1;
+    const y = Number.parseInt(match[3], 10) - 1;
+    const suffix = match[4];
+    const shift = (code & 4) !== 0;
+    const alt = (code & 8) !== 0;
+    const ctrl = (code & 16) !== 0;
+    const motion = (code & 32) !== 0;
+    if ((code & 64) !== 0) {
+        const directionCode = code & 3;
+        const direction = directionCode === 0
+            ? "up"
+            : directionCode === 1
+                ? "down"
+                : directionCode === 2
+                    ? "left"
+                    : "right";
+        return {
+            type: "scroll",
+            x,
+            y,
+            button: (64 + directionCode),
+            direction,
+            shift,
+            alt,
+            ctrl,
+        };
+    }
+    if (motion) {
+        return {
+            type: (code & 3) === 3 ? "move" : "drag",
+            x,
+            y,
+            button: parseMouseButton(code),
+            shift,
+            alt,
+            ctrl,
+        };
+    }
+    return {
+        type: suffix === "M" ? "down" : "up",
+        x,
+        y,
+        button: parseMouseButton(code),
+        shift,
+        alt,
+        ctrl,
+    };
+}
+/** Consume all complete SGR mouse sequences from a buffered terminal input stream. */
+export function parseSgrMouseStream(buffer) {
+    const events = [];
+    let index = 0;
+    while (index < buffer.length) {
+        const start = buffer.indexOf(`${ESCAPE}[<`, index);
+        if (start === -1) {
+            return { events, rest: "" };
+        }
+        const candidate = buffer.slice(start);
+        const match = candidate.match(SGR_MOUSE_SEQUENCE_PATTERN);
+        if (match) {
+            const sequence = match[0];
+            const event = parseSgrMouseInput(sequence);
+            if (event) {
+                events.push(event);
+            }
+            index = start + sequence.length;
+            continue;
+        }
+        return {
+            events,
+            rest: buffer.slice(start),
+        };
+    }
+    return { events, rest: "" };
+}

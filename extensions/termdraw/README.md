@@ -1,18 +1,6 @@
-# @termdraw/pi
+# termDRAW Pi extension
 
-`@termdraw/pi` embeds termDRAW inside Pi using `opentui-island` so you can open the editor as a full-screen Pi overlay and insert drawings back into the current editor.
-
-## Install
-
-```bash
-pi install npm:@termdraw/pi
-```
-
-For a project-local install:
-
-```bash
-pi install -l npm:@termdraw/pi
-```
+This local extension embeds termDRAW inside Pi using the copied `opentui-island` helper so you can open the editor as a full-screen Pi overlay and insert drawings back into the current editor.
 
 ## Usage
 
@@ -26,17 +14,12 @@ Use `Enter` or `Ctrl+S` to insert the drawing into Pi. Use `Ctrl+Q` to close wit
 
 ## Local development
 
-From this repo:
+This repo's root `package.json` loads `./extensions`, so the command is available when `my-agent-stuff` is installed as a Pi package.
+
+For a one-off test:
 
 ```bash
-bun install
-pi install ./packages/pi
-```
-
-Or run the extension directly for a one-off test:
-
-```bash
-pi -e ./packages/pi/extensions/index.ts
+pi -e ./extensions/termdraw/index.ts
 ```
 
 ## Smoke test
@@ -64,8 +47,8 @@ Set `PI_TERMDRAW_SMOKE_KEEP_SESSION=1` if you want the tmux session left alive f
 
 - Requires Bun 1.3+ on the machine running Pi.
 - The embedded island currently loads from source (`islands/termdraw.island.tsx`) via Bun.
-- For local development, `opentui-island@0.4.x` is used for save/cancel result bridging.
-- `opentui-island` may still require `--legacy-peer-deps` in some npm setups depending on the Pi version in use.
+- A local copy of `opentui-island@0.4.x` is used for save/cancel result bridging.
+- The local copy runs on `@opentui/*@0.2.15` to avoid the vulnerable OpenTUI 0.1.x dependency tree.
 - This package targets the terminal Pi experience first. GUI support will depend on Pi's extension UI surface.
 
 ## License
