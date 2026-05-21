@@ -1,0 +1,2 @@
+# Historical false positive: Terraform password_length argument documentation, not a secret.
+3445bbb8230893c00d73a1f29518750379d4a37f:skills/iac-security-scanner/references/aws/aws_iam_user_login_profile.md:generic-api-key:27
