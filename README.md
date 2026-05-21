@@ -1,8 +1,8 @@
 # My Agent Stuff
 
-Inspired by https://github.com/mitsuhiko/agent-stuff
-This is "my" agent-stuff
-Although I would never marry any solution, pi.dev is mostly my daily driver now
+- Inspired by https://github.com/mitsuhiko/agent-stuff
+- This is "my" agent-stuff
+- Although I would never marry any solution, pi.dev is mostly my daily driver now
 
 ## Pi Skills
 
