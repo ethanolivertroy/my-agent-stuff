@@ -43,7 +43,7 @@ Likely modern tool surface from existing Linear MCP skill/docs/changelog:
 Implement the Pi extension as a dynamic MCP-to-Pi adapter:
 
 1. Connect to `https://mcp.linear.app/mcp` with the MCP TypeScript client SDK.
-2. Authenticate using `LINEAR_API_KEY`/`LINEAR_ACCESS_TOKEN` first; add OAuth setup after MVP.
+2. Authenticate using password-manager refs first, with `LINEAR_API_KEY`/`LINEAR_ACCESS_TOKEN` as CI/dev fallback; add OAuth setup after MVP.
 3. Call authenticated `tools/list` at extension startup.
 4. Register each Linear MCP tool dynamically with `pi.registerTool()` using the MCP tool name, description, and JSON schema.
 5. On Pi tool execution, call upstream MCP `callTool({ name, arguments })` and return MCP content/details to Pi.
@@ -129,15 +129,20 @@ Core Pi APIs:
 
 MVP:
 
-- Read token from env: `LINEAR_API_KEY` or `LINEAR_ACCESS_TOKEN`.
-- Pass as `Authorization: Bearer <token>` to MCP transport.
-- Provide a `/linear-status` command that verifies `tools/list` works.
+- Resolve token from secure local password-manager refs first:
+  - Proton Pass CLI vault/item lookup: `LINEAR_MCP_PROTON_PASS_VAULT='Personal'`, `LINEAR_MCP_PROTON_PASS_ITEM='Linear API Key'`, `LINEAR_MCP_PROTON_PASS_FIELD='password'`
+  - Proton Pass CLI URI ref: `LINEAR_MCP_PROTON_PASS_REF='pass://share-id/item-id/password'`
+  - 1Password CLI ref: `LINEAR_MCP_1PASSWORD_REF='op://ExampleVault/Linear API Key/token'`
+- Keep env-token fallback for CI/dev: `LINEAR_API_KEY`, `LINEAR_ACCESS_TOKEN`, or `LINEAR_MCP_TOKEN`.
+- Keep last-resort generic `LINEAR_MCP_TOKEN_COMMAND`, but document it as less safe because it uses a shell.
+- Pass resolved token as `Authorization: Bearer <token>` to MCP transport.
+- Provide a `/linear-status` command that reports auth source and verifies `tools/list` works.
+- Never persist tokens to session entries, snapshots, tool results, or logs.
 
 Post-MVP:
 
 - OAuth 2.1 flow using MCP SDK OAuth provider.
-- Store credentials in Pi auth storage if the extension API exposes an appropriate mechanism; otherwise store under `~/.pi/agent/linear-mcp/credentials.json` with `0600` permissions.
-- Never persist tokens to session entries or tool details.
+- Store OAuth credentials in Pi auth storage if the extension API exposes an appropriate mechanism; otherwise store under `~/.pi/agent/linear-mcp/credentials.json` with `0600` permissions.
 
 ## Testing strategy
 
@@ -163,14 +168,20 @@ Post-MVP:
 - Should mutating tools require confirmation by default?
 - Where should OAuth credentials live for Pi extensions?
 
-## Proposed next implementation slice
+## Implemented MVP status
 
-Build a minimal dynamic mirror:
+The extension now implements the minimal dynamic mirror:
 
-1. Add `extensions/linear-mcp/package.json` and `index.ts`.
-2. Connect to Linear MCP with bearer auth from env.
-3. Fetch `tools/list` and register every tool.
-4. Forward `execute()` calls to MCP `callTool`.
-5. Add `/linear-status` and `/linear-refresh-tools`.
-6. Add README setup instructions.
-7. Run a live read-only smoke test once a token is available.
+1. Connects to Linear MCP with bearer auth resolved from Proton Pass, 1Password, env token fallback, or an explicit token command.
+2. Fetches `tools/list` and registers every tool dynamically.
+3. Forwards Pi tool calls to MCP `callTool`.
+4. Adds `/linear-status` and `/linear-refresh-tools`.
+5. Writes a non-secret live tool snapshot to `~/.pi/agent/linear-mcp/tools.latest.json` for debugging.
+6. Rejects multiline secret command output to avoid accidentally sending full secret-manager item dumps as bearer tokens.
+
+Remaining non-MVP work:
+
+- OAuth browser setup.
+- Autocomplete for Linear issue IDs and entity names.
+- Custom renderers for common Linear objects.
+- Automated live smoke test once a token is available in the environment.
