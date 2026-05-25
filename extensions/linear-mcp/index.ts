@@ -50,8 +50,54 @@ function getEndpoint(): string {
 	return process.env.LINEAR_MCP_ENDPOINT?.trim() || DEFAULT_ENDPOINT;
 }
 
-function getToken(): string | undefined {
-	return process.env.LINEAR_MCP_TOKEN?.trim() || process.env.LINEAR_ACCESS_TOKEN?.trim() || process.env.LINEAR_API_KEY?.trim();
+function getEnv(name: string): string | undefined {
+	const value = process.env[name]?.trim();
+	return value || undefined;
+}
+
+function getStaticToken(): string | undefined {
+	return getEnv("LINEAR_MCP_TOKEN") || getEnv("LINEAR_ACCESS_TOKEN") || getEnv("LINEAR_API_KEY");
+}
+
+function getOnePasswordRef(): string | undefined {
+	return getEnv("LINEAR_MCP_1PASSWORD_REF");
+}
+
+function getProtonPassRef(): string | undefined {
+	return getEnv("LINEAR_MCP_PROTON_PASS_REF") || getEnv("LINEAR_MCP_PROTONPASS_REF");
+}
+
+function getProtonPassCli(): string {
+	return getEnv("LINEAR_MCP_PROTON_PASS_CLI") || getEnv("LINEAR_MCP_PROTONPASS_CLI") || "pass-cli";
+}
+
+function getProtonPassNamedConfig(): { vault: string; item: string; field: string } | undefined {
+	const vault = getEnv("LINEAR_MCP_PROTON_PASS_VAULT") || getEnv("LINEAR_MCP_PROTONPASS_VAULT");
+	const item = getEnv("LINEAR_MCP_PROTON_PASS_ITEM") || getEnv("LINEAR_MCP_PROTONPASS_ITEM");
+	const field = getEnv("LINEAR_MCP_PROTON_PASS_FIELD") || getEnv("LINEAR_MCP_PROTONPASS_FIELD") || "password";
+
+	if (!vault && !item) return undefined;
+	if (!vault || !item) {
+		throw new Error(
+			"Incomplete Proton Pass config. Set both LINEAR_MCP_PROTON_PASS_VAULT and LINEAR_MCP_PROTON_PASS_ITEM, or use LINEAR_MCP_PROTON_PASS_REF.",
+		);
+	}
+	return { vault, item, field };
+}
+
+function getTokenCommand(): string | undefined {
+	return getEnv("LINEAR_MCP_TOKEN_COMMAND");
+}
+
+function getConfiguredTokenSource(): string | undefined {
+	if (getProtonPassRef()) return "Proton Pass CLI (URI ref)";
+	if (getEnv("LINEAR_MCP_PROTON_PASS_VAULT") || getEnv("LINEAR_MCP_PROTON_PASS_ITEM") || getEnv("LINEAR_MCP_PROTONPASS_VAULT") || getEnv("LINEAR_MCP_PROTONPASS_ITEM")) {
+		return "Proton Pass CLI (vault/item)";
+	}
+	if (getOnePasswordRef()) return "1Password CLI";
+	if (getStaticToken()) return "environment token";
+	if (getTokenCommand()) return "token command";
+	return undefined;
 }
 
 function getTimeoutMs(): number {
@@ -68,14 +114,77 @@ function shouldConfirmMutations(): boolean {
 	return ["1", "true", "yes", "on"].includes((process.env.LINEAR_MCP_CONFIRM_MUTATIONS || "").toLowerCase());
 }
 
-function assertConfigured(): string {
-	const token = getToken();
-	if (!token) {
-		throw new Error(
-			"Linear MCP is not configured. Set LINEAR_API_KEY, LINEAR_ACCESS_TOKEN, or LINEAR_MCP_TOKEN, then /reload or run /linear-refresh-tools.",
-		);
+function normalizeSecretOutput(output: string, source: string): string {
+	const token = output.trim();
+	if (!token) throw new Error(`${source} produced an empty token.`);
+	const nonEmptyLines = token.split(/\r?\n/).filter((line) => line.trim().length > 0);
+	if (nonEmptyLines.length > 1) {
+		throw new Error(`${source} produced multiple lines. Point the secret reference at a single token field.`);
 	}
 	return token;
+}
+
+async function execSecret(command: string, args: string[], label: string, includeStderr = true): Promise<string> {
+	const { execFile } = await import("node:child_process");
+	return new Promise((resolve, reject) => {
+		execFile(
+			command,
+			args,
+			{ timeout: 30_000, maxBuffer: 1024 * 1024, encoding: "utf8" },
+			(error, stdout, stderr) => {
+				if (error) {
+					const stderrText = stderr.trim();
+					const detail = includeStderr && stderrText ? stderrText : error.message;
+					reject(new Error(`${label} failed: ${detail}`));
+					return;
+				}
+				resolve(normalizeSecretOutput(stdout, label));
+			},
+		);
+	});
+}
+
+async function resolveToken(): Promise<string> {
+	const protonPassRef = getProtonPassRef();
+	if (protonPassRef) {
+		return execSecret(getProtonPassCli(), ["item", "view", protonPassRef], "Proton Pass CLI");
+	}
+
+	const protonPassNamedConfig = getProtonPassNamedConfig();
+	if (protonPassNamedConfig) {
+		return execSecret(
+			getProtonPassCli(),
+			[
+				"item",
+				"view",
+				"--vault-name",
+				protonPassNamedConfig.vault,
+				"--item-title",
+				protonPassNamedConfig.item,
+				"--field",
+				protonPassNamedConfig.field,
+			],
+			"Proton Pass CLI",
+		);
+	}
+
+	const onePasswordRef = getOnePasswordRef();
+	if (onePasswordRef) {
+		const opBinary = getEnv("LINEAR_MCP_1PASSWORD_CLI") || "op";
+		return execSecret(opBinary, ["read", onePasswordRef], "1Password CLI");
+	}
+
+	const staticToken = getStaticToken();
+	if (staticToken) return staticToken;
+
+	const tokenCommand = getTokenCommand();
+	if (tokenCommand) {
+		return execSecret("/bin/sh", ["-lc", tokenCommand], "LINEAR_MCP_TOKEN_COMMAND", false);
+	}
+
+	throw new Error(
+		"Linear MCP is not configured. Set LINEAR_MCP_PROTON_PASS_REF, LINEAR_MCP_PROTON_PASS_VAULT/ITEM, LINEAR_MCP_1PASSWORD_REF, LINEAR_API_KEY, LINEAR_ACCESS_TOKEN, LINEAR_MCP_TOKEN, or LINEAR_MCP_TOKEN_COMMAND, then /reload or run /linear-refresh-tools.",
+	);
 }
 
 function normalizeToolName(name: string): string {
@@ -275,7 +384,7 @@ export default function linearMcpExtension(pi: ExtensionAPI): void {
 		if (connectionPromise) return connectionPromise;
 
 		connectionPromise = (async () => {
-			const token = assertConfigured();
+			const token = await resolveToken();
 			const endpoint = getEndpoint();
 			const client = new Client({ name: "pi-linear-mcp", version: EXTENSION_VERSION });
 			const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
@@ -392,13 +501,13 @@ export default function linearMcpExtension(pi: ExtensionAPI): void {
 		return tools;
 	}
 
-	function setStatus(ctx: ExtensionContext, text: string): void {
+	function setStatus(ctx: ExtensionContext, text: string | undefined): void {
 		ctx.ui.setStatus(STATUS_KEY, text);
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (!getToken()) {
-			setStatus(ctx, "Linear: not configured");
+		if (!getConfiguredTokenSource()) {
+			setStatus(ctx, undefined);
 			return;
 		}
 
@@ -429,10 +538,12 @@ export default function linearMcpExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("linear-status", {
 		description: "Show Linear MCP connection status and mirrored tool count",
 		handler: async (args, ctx) => {
-			const configured = Boolean(getToken());
+			const tokenSource = getConfiguredTokenSource();
+			const configured = Boolean(tokenSource);
 			const lines = [
 				`Linear MCP endpoint: ${getEndpoint()}`,
 				`Auth configured: ${configured ? "yes" : "no"}`,
+				`Auth source: ${tokenSource || "none"}`,
 				`Connected: ${connection ? "yes" : "no"}`,
 				`Mirrored tools: ${lastTools.length}`,
 			];

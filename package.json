@@ -32,7 +32,8 @@
   "scripts": {
     "secrets:scan": "scripts/secret-scan.sh --working-tree",
     "secrets:scan-history": "scripts/secret-scan.sh --all",
-    "secrets:install-hooks": "git config core.hooksPath .githooks"
+    "secrets:install-hooks": "git config core.hooksPath .githooks",
+    "linear:smoke": "node scripts/linear-mcp-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
