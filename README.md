@@ -44,6 +44,7 @@ Installed hooks run a staged scan before commits and an outgoing-commit scan bef
 | [mesh-security](./skills/mesh-security) | Analyze Istio, Consul, and Linkerd service mesh configurations for security issues and NIST control mappings. |
 | [mischief-managed](./skills/mischief-managed) | Capture a lean end-of-session note into an Obsidian vault with decisions, changes, validation, caveats, and follow-ups. |
 | [pi-subagents](./skills/pi-subagents) | Instructions for delegating work to the local subagent extension. |
+| [security-review](./skills/security-review) | Perform high-signal security reviews of pending branch changes with explicit false-positive filtering. |
 | [autoresearch-create](./skills/autoresearch-create) | Start an autonomous optimization experiment loop. |
 | [autoresearch-finalize](./skills/autoresearch-finalize) | Finalize autoresearch sessions into reviewable branches. |
 | [autoresearch-hooks](./skills/autoresearch-hooks) | Author pre/post iteration hooks for autoresearch. |
