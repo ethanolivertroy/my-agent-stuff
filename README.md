@@ -22,12 +22,15 @@ npm run secrets:scan
 
 Installed hooks run a staged scan before commits and an outgoing-commit scan before pushes. Use `SKIP_SECRET_SCAN=1` only for emergency bypasses.
 
+Extensions that need API tokens should use the shared local resolver in [`src/secret-resolver.ts`](./src/secret-resolver.ts); see [`docs/extension-secret-management.md`](./docs/extension-secret-management.md). Store password-manager refs in `.env.local`, not raw tokens.
+
 ## Pi Extensions
 
 | Extension | Description |
 | --- | --- |
 | [linear-mcp](./extensions/linear-mcp) | Mirror Linear's official hosted MCP server into Pi tools with dynamic `tools/list` registration. |
 | [ollama-web-search](./extensions/ollama-web-search.ts) | Local Ollama-backed `web_search` and `web_fetch` tools. |
+| [grok-cli](./extensions/grok-cli) | Use Grok Build/Composer in Pi through the existing Grok CLI login session. |
 | [termdraw](./extensions/termdraw) | Open termDRAW inside a Pi overlay with `/termdraw`. |
 | [voipi](./extensions/voipi) | Text-to-speech tools and `/tts` commands. |
 | [subagents](./extensions/subagents) | Subagent orchestration tool, built-in agents, and related commands. |

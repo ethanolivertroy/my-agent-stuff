@@ -16,28 +16,32 @@ https://mcp.linear.app/mcp
 
 Create a Linear API key or OAuth access token, store it in a password manager, then point the extension at the secret reference.
 
-Recommended with Proton Pass CLI, using human-readable vault/item names:
+Recommended: put only a password-manager reference in `.env.local`:
+
+```bash
+LINEAR_MCP_SECRET_REF='pass://ExampleVault/pi-linear/API Key'
+# or
+LINEAR_MCP_SECRET_REF='op://ExampleVault/pi-linear/API Key'
+```
+
+`.env.local` is auto-loaded for safe reference metadata only; raw token variables are intentionally not loaded from files.
+
+Proton Pass CLI also supports split vault/item fields:
 
 ```bash
 export LINEAR_MCP_PROTON_PASS_VAULT='Personal'
-export LINEAR_MCP_PROTON_PASS_ITEM='Linear API Key'
-export LINEAR_MCP_PROTON_PASS_FIELD='password'
+export LINEAR_MCP_PROTON_PASS_ITEM='pi-linear'
+export LINEAR_MCP_PROTON_PASS_FIELD='API Key'
 ```
 
-Or with a Proton Pass URI ref:
+Manager-specific refs still work:
 
 ```bash
-# Ref format accepted by pass-cli: pass://<SHARE_ID>/<ITEM_ID>[/FIELD]
-export LINEAR_MCP_PROTON_PASS_REF='pass://share-id/item-id/password'
+export LINEAR_MCP_PROTON_PASS_REF='pass://ExampleVault/pi-linear/API Key'
+export LINEAR_MCP_1PASSWORD_REF='op://ExampleVault/pi-linear/API Key'
 ```
 
-Recommended with 1Password CLI:
-
-```bash
-export LINEAR_MCP_1PASSWORD_REF='op://ExampleVault/Linear API Key/token'
-```
-
-Plain env tokens still work for CI/dev:
+Plain env tokens still work for CI/dev if exported by the shell:
 
 ```bash
 export LINEAR_API_KEY="lin_api_..."
@@ -70,7 +74,9 @@ npm run linear:smoke
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LINEAR_MCP_PROTON_PASS_REF` | unset | Proton Pass URI reference accepted by `pass-cli item view`, e.g. `pass://share-id/item-id/password`. |
+| `LINEAR_MCP_SECRET_REF` | unset | Preferred generic secret ref. Supports `pass://...` and `op://...`. Safe to place in `.env.local`. |
+| `LINEAR_MCP_TOKEN_REF` | unset | Alias generic token ref. Supports `pass://...` and `op://...`. Safe to place in `.env.local`. |
+| `LINEAR_MCP_PROTON_PASS_REF` | unset | Proton Pass URI reference accepted by `pass-cli item view`, e.g. `pass://ExampleVault/pi-linear/API Key`. |
 | `LINEAR_MCP_PROTON_PASS_VAULT` | unset | Proton Pass vault name for human-readable lookup. Use with `LINEAR_MCP_PROTON_PASS_ITEM`. |
 | `LINEAR_MCP_PROTON_PASS_ITEM` | unset | Proton Pass item title for human-readable lookup. Use with `LINEAR_MCP_PROTON_PASS_VAULT`. |
 | `LINEAR_MCP_PROTON_PASS_FIELD` | `password` | Proton Pass field to read in vault/item mode. |
@@ -95,6 +101,8 @@ npm run linear:smoke
 - Proton Pass CLI support runs `pass-cli item view ...` without a shell.
 - 1Password CLI support runs `op read "$LINEAR_MCP_1PASSWORD_REF"` without a shell.
 - Password-manager refs are tried before plain environment tokens.
+- Secret resolution is shared through `src/secret-resolver.ts` so other extensions can use the same pattern.
+- `.env.local`/`.env` auto-loading only imports reference/config metadata such as `*_REF`, `*_VAULT`, `*_ITEM`, `*_FIELD`, and `*_CLI`; it skips raw `*_TOKEN`, `*_API_KEY`, `*_PASSWORD`, and `*_SECRET` values.
 - Secret command output must be a single non-empty line; multiline output is rejected so item dumps are not accidentally sent as bearer tokens.
 - `LINEAR_MCP_TOKEN_COMMAND` uses `/bin/sh -lc` and is less safe; prefer Proton Pass or 1Password refs.
 - OAuth browser setup is not implemented yet; token-based auth is the MVP path.

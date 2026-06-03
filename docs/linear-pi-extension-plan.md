@@ -43,7 +43,7 @@ Likely modern tool surface from existing Linear MCP skill/docs/changelog:
 Implement the Pi extension as a dynamic MCP-to-Pi adapter:
 
 1. Connect to `https://mcp.linear.app/mcp` with the MCP TypeScript client SDK.
-2. Authenticate using password-manager refs first, with `LINEAR_API_KEY`/`LINEAR_ACCESS_TOKEN` as CI/dev fallback; add OAuth setup after MVP.
+2. Authenticate through the shared local secret resolver (`src/secret-resolver.ts`) using password-manager refs first, with `LINEAR_API_KEY`/`LINEAR_ACCESS_TOKEN` as CI/dev fallback; add OAuth setup after MVP.
 3. Call authenticated `tools/list` at extension startup.
 4. Register each Linear MCP tool dynamically with `pi.registerTool()` using the MCP tool name, description, and JSON schema.
 5. On Pi tool execution, call upstream MCP `callTool({ name, arguments })` and return MCP content/details to Pi.
@@ -130,9 +130,11 @@ Core Pi APIs:
 MVP:
 
 - Resolve token from secure local password-manager refs first:
-  - Proton Pass CLI vault/item lookup: `LINEAR_MCP_PROTON_PASS_VAULT='Personal'`, `LINEAR_MCP_PROTON_PASS_ITEM='Linear API Key'`, `LINEAR_MCP_PROTON_PASS_FIELD='password'`
-  - Proton Pass CLI URI ref: `LINEAR_MCP_PROTON_PASS_REF='pass://share-id/item-id/password'`
-  - 1Password CLI ref: `LINEAR_MCP_1PASSWORD_REF='op://ExampleVault/Linear API Key/token'`
+  - Generic preferred ref: `LINEAR_MCP_SECRET_REF='pass://ExampleVault/pi-linear/API Key'` or `LINEAR_MCP_SECRET_REF='op://ExampleVault/pi-linear/API Key'`
+  - Proton Pass CLI vault/item lookup: `LINEAR_MCP_PROTON_PASS_VAULT='Personal'`, `LINEAR_MCP_PROTON_PASS_ITEM='pi-linear'`, `LINEAR_MCP_PROTON_PASS_FIELD='API Key'`
+  - Proton Pass CLI URI ref: `LINEAR_MCP_PROTON_PASS_REF='pass://ExampleVault/pi-linear/API Key'`
+  - 1Password CLI ref: `LINEAR_MCP_1PASSWORD_REF='op://ExampleVault/pi-linear/API Key'`
+- Auto-load `.env.local`/`.env` reference metadata only; do not auto-load raw token-looking variables from files.
 - Keep env-token fallback for CI/dev: `LINEAR_API_KEY`, `LINEAR_ACCESS_TOKEN`, or `LINEAR_MCP_TOKEN`.
 - Keep last-resort generic `LINEAR_MCP_TOKEN_COMMAND`, but document it as less safe because it uses a shell.
 - Pass resolved token as `Authorization: Bearer <token>` to MCP transport.
