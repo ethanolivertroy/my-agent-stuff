@@ -28,10 +28,14 @@ Extensions that need API tokens should use the shared local resolver in [`src/se
 
 | Extension | Description |
 | --- | --- |
+| [exa-search](./extensions/exa-search) | Advanced Exa web search with categories, filters, and optional result contents. |
 | [linear-mcp](./extensions/linear-mcp) | Mirror Linear's official hosted MCP server into Pi tools with dynamic `tools/list` registration. |
 | [ollama-web-search](./extensions/ollama-web-search.ts) | Local Ollama-backed `web_search` and `web_fetch` tools. |
 | [grok-cli](./extensions/grok-cli) | Use Grok Build/Composer in Pi through the existing Grok CLI login session. |
 | [hf-buckets](./extensions/hf-buckets) | Safe private Hugging Face Bucket backups with detached jobs, verification, and quarantine. |
+| [mm-command](./extensions/mm-command.ts) | Shortcut command for invoking the `mischief-managed` session-note skill. |
+| [nanobanana](./extensions/nanobanana) | Generate or edit images with Google Gemini image models. |
+| [rich-clipboard](./extensions/rich-clipboard) | Copy Markdown, HTML, or plain text to the system clipboard for rich paste targets. |
 | [termdraw](./extensions/termdraw) | Open termDRAW inside a Pi overlay with `/termdraw`. |
 | [voipi](./extensions/voipi) | Text-to-speech tools and `/tts` commands. |
 | [subagents](./extensions/subagents) | Subagent orchestration tool, built-in agents, and related commands. |
@@ -41,10 +45,14 @@ Extensions that need API tokens should use the shared local resolver in [`src/se
 
 | Skill | Description |
 | --- | --- |
+| [clipboard-posting](./skills/clipboard-posting) | Use the rich clipboard extension for approved drafts, LinkedIn, and X posting flows. |
+| [conversation-dump](./skills/conversation-dump) | Export a full readable Markdown transcript of the current Pi conversation. |
 | [exif-stripper](./skills/exif-stripper) | Strip sensitive EXIF metadata from images before publishing to the web. |
 | [iac-security-scanner](./skills/iac-security-scanner) | Scan Terraform, Kubernetes, CloudFormation, ARM templates, and Dockerfiles for security misconfigurations with NIST mappings. |
 | [image-generator](./skills/image-generator) | Generate and edit images through Gemini image models. |
 | [huggingface-backup](./skills/huggingface-backup) | Safely back up local folders to private Hugging Face Buckets using `hf` and the `hf-buckets` extension. |
+| [jot](./skills/jot) | Append quick notes to a configured Obsidian daily note. |
+| [linear](./skills/linear) | Manage Linear issues, projects, cycles, and status workflows through the Linear MCP server. |
 | [made-to-stick](./skills/made-to-stick) | Apply the SUCCESs framework to make ideas, copy, and content more memorable. |
 | [mesh-security](./skills/mesh-security) | Analyze Istio, Consul, and Linkerd service mesh configurations for security issues and NIST control mappings. |
 | [mischief-managed](./skills/mischief-managed) | Capture a lean end-of-session note into an Obsidian vault with decisions, changes, validation, caveats, and follow-ups. |

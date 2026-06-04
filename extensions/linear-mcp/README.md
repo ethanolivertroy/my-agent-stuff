@@ -29,7 +29,7 @@ LINEAR_MCP_SECRET_REF='op://ExampleVault/pi-linear/API Key'
 Proton Pass CLI also supports split vault/item fields:
 
 ```bash
-export LINEAR_MCP_PROTON_PASS_VAULT='Personal'
+export LINEAR_MCP_PROTON_PASS_VAULT='ExampleVault'
 export LINEAR_MCP_PROTON_PASS_ITEM='pi-linear'
 export LINEAR_MCP_PROTON_PASS_FIELD='API Key'
 ```

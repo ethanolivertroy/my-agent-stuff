@@ -131,7 +131,7 @@ MVP:
 
 - Resolve token from secure local password-manager refs first:
   - Generic preferred ref: `LINEAR_MCP_SECRET_REF='pass://ExampleVault/pi-linear/API Key'` or `LINEAR_MCP_SECRET_REF='op://ExampleVault/pi-linear/API Key'`
-  - Proton Pass CLI vault/item lookup: `LINEAR_MCP_PROTON_PASS_VAULT='Personal'`, `LINEAR_MCP_PROTON_PASS_ITEM='pi-linear'`, `LINEAR_MCP_PROTON_PASS_FIELD='API Key'`
+  - Proton Pass CLI vault/item lookup: `LINEAR_MCP_PROTON_PASS_VAULT='ExampleVault'`, `LINEAR_MCP_PROTON_PASS_ITEM='pi-linear'`, `LINEAR_MCP_PROTON_PASS_FIELD='API Key'`
   - Proton Pass CLI URI ref: `LINEAR_MCP_PROTON_PASS_REF='pass://ExampleVault/pi-linear/API Key'`
   - 1Password CLI ref: `LINEAR_MCP_1PASSWORD_REF='op://ExampleVault/pi-linear/API Key'`
 - Auto-load `.env.local`/`.env` reference metadata only; do not auto-load raw token-looking variables from files.

@@ -125,8 +125,8 @@ Use lowercase, hyphenated bucket names:
 
 - `project-backup`
 - `training-data-archive`
-- `research-corpus-YYYY-MM-DD`
 - `model-artifacts-YYYY-MM-DD`
+- `research-corpus-YYYY-MM-DD`
 - `agent-traces-YYYY-MM-DD`
 
-If the user says “repo” but also says “bucket”, prefer bucket. Ask only if ambiguous and destructive or public/private semantics matter.
+If the user says "repo" but also says "bucket", prefer bucket. Ask only if ambiguous and destructive or public/private semantics matter.

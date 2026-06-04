@@ -35,6 +35,10 @@
     "secrets:install-hooks": "git config core.hooksPath .githooks",
     "linear:smoke": "node scripts/linear-mcp-smoke.mjs"
   },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "0.2.15",
@@ -42,6 +46,7 @@
     "@sinclair/typebox": "^0.34.41",
     "jiti": "^2.7.0",
     "js-yaml": "^4.1.0",
+    "marked": "^18.0.2",
     "react": "^19.2.0",
     "typebox": "^1.1.33"
   }
