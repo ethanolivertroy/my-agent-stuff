@@ -45,7 +45,7 @@
     "@opentui/react": "0.2.15",
     "@sinclair/typebox": "^0.34.41",
     "jiti": "^2.7.0",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.2.0",
     "marked": "^18.0.2",
     "react": "^19.2.0",
     "typebox": "^1.1.33"
